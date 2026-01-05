@@ -28,6 +28,10 @@ export {
   recalculatePriorities,
   getStateAnalysis,
   analyzeQueue,
+  // IRT-based selection
+  applyIRTReordering,
+  getNextItemWithIRT,
+  getLearningQueueWithIRT,
 } from './state-priority.service';
 
 // Layer 2: Task Generation
@@ -87,3 +91,19 @@ export {
   updateSessionBalance,
   getBalanceStatistics,
 } from './fluency-versatility.service';
+
+// PMI (Pointwise Mutual Information) Service
+export {
+  // Types
+  type WordDifficultyResult,
+  type CollocationResult,
+  // Functions
+  getWordDifficulty,
+  getCollocations,
+  getRelationalDensity,
+  updateIRTDifficulties,
+  updateRelationalDensities,
+  storeCollocations,
+  clearCalculatorCache,
+  clearAllCalculatorCaches,
+} from './pmi.service';

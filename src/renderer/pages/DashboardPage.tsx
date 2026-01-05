@@ -10,7 +10,7 @@ import { useApp } from '../context';
 import { useProgress, useMasteryStats, useBottlenecks, useObjects } from '../hooks';
 import { ProgressDashboard, NetworkGraphCard } from '../components/analytics';
 import type { GraphNode, GraphEdge } from '../components/analytics';
-import { GlassCard, GlassButton } from '../components/ui';
+import { GlassCard, GlassButton, Logo } from '../components/ui';
 
 interface DashboardPageProps {
   onNavigateToSession?: () => void;
@@ -92,7 +92,7 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
     return (
       <div className="flex flex-col items-center justify-center h-full gap-6">
         <div className="text-center">
-          <div className="text-6xl mb-4">🎯</div>
+          <Logo size="xl" className="mx-auto mb-4" />
           <h1 className="text-2xl font-bold mb-2">Welcome to LOGOS</h1>
           <p className="text-muted max-w-md">
             Start your language learning journey by creating a goal.

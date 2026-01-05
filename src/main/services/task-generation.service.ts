@@ -9,6 +9,7 @@
 import { getPrisma } from '../db/prisma';
 import { getMasteryState } from '../db/repositories/mastery.repository';
 import { getCollocationsForWord } from '../db/repositories/collocation.repository';
+import { getWordDifficulty, type WordDifficultyResult } from './pmi.service';
 import type { LearningQueueItem } from './state-priority.service';
 
 // =============================================================================
@@ -199,6 +200,54 @@ export function calculateTaskDifficulty(
   return irtDifficulty + formatModifier[format] + cueModifier;
 }
 
+/**
+ * Calculate task difficulty enhanced with PMI data.
+ * Falls back to IRT-only difficulty if PMI unavailable.
+ */
+export async function calculateTaskDifficultyWithPMI(
+  goalId: string,
+  content: string,
+  irtDifficulty: number,
+  format: TaskFormat,
+  cueLevel: CueLevel
+): Promise<{ difficulty: number; pmiResult: WordDifficultyResult | null }> {
+  // Try to get PMI-based difficulty
+  let pmiResult: WordDifficultyResult | null = null;
+
+  try {
+    // Map task format to PMI task type
+    const taskTypeMap: Record<TaskFormat, 'recognition' | 'recall_cued' | 'recall_free' | 'production'> = {
+      mcq: 'recognition',
+      fill_blank: 'recall_cued',
+      matching: 'recognition',
+      ordering: 'recall_free',
+      free_response: 'production',
+    };
+
+    const mainWord = content.split(/\s+/)[0];
+    if (mainWord) {
+      pmiResult = await getWordDifficulty(goalId, mainWord, taskTypeMap[format]);
+    }
+  } catch {
+    // PMI unavailable, use fallback
+  }
+
+  // Calculate base difficulty
+  let baseDifficulty: number;
+
+  if (pmiResult?.pmiBasedDifficulty !== null && pmiResult?.pmiBasedDifficulty !== undefined) {
+    // Blend PMI-based and IRT-based difficulty (PMI weighted higher for collocations)
+    baseDifficulty = pmiResult.pmiBasedDifficulty * 0.6 + irtDifficulty * 0.4;
+  } else {
+    baseDifficulty = irtDifficulty;
+  }
+
+  // Apply format and cue modifiers
+  const difficulty = calculateTaskDifficulty(baseDifficulty, format, cueLevel);
+
+  return { difficulty, pmiResult };
+}
+
 // =============================================================================
 // Task Generation
 // =============================================================================
@@ -249,9 +298,15 @@ export async function generateTaskSpec(
     config.maxCueLevel
   );
 
-  // Calculate difficulty
+  // Calculate difficulty with PMI enhancement
   const baseDifficulty = object.irtDifficulty + (config.difficultyAdjustment ?? 0);
-  const difficulty = calculateTaskDifficulty(baseDifficulty, format, cueLevel);
+  const { difficulty } = await calculateTaskDifficultyWithPMI(
+    object.goalId,
+    object.content,
+    baseDifficulty,
+    format,
+    cueLevel
+  );
 
   return {
     objectId: item.objectId,

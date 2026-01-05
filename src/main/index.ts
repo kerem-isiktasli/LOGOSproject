@@ -11,8 +11,14 @@ import { registerAllHandlers } from './ipc';
 import { initDatabase } from './db/client';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
-if (require('electron-squirrel-startup')) {
-  app.quit();
+// Note: electron-squirrel-startup is only needed for Squirrel-based installers
+// We use NSIS, so this is wrapped in try-catch for compatibility
+try {
+  if (require('electron-squirrel-startup')) {
+    app.quit();
+  }
+} catch {
+  // electron-squirrel-startup not available - using NSIS installer
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -39,7 +45,7 @@ async function createWindow(): Promise<void> {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: true,
+      sandbox: false, // Disabled for preload script compatibility
     },
   });
 

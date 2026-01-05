@@ -21,6 +21,7 @@ import {
   getPrimaryBottleneck,
   type BottleneckResult,
 } from '../db/repositories/error-analysis.repository';
+import { selectNextItem, fisherInformation, type ItemParameter } from '../../core/irt';
 
 // =============================================================================
 // Types
@@ -456,4 +457,127 @@ export async function getStateAnalysis(
   ]);
 
   return { theta, mastery, queue, primaryBottleneck };
+}
+
+// =============================================================================
+// IRT-Based Item Selection
+// =============================================================================
+
+/**
+ * Convert learning queue items to IRT item parameters.
+ */
+function toItemParameters(items: LearningQueueItem[]): ItemParameter[] {
+  return items.map((item) => ({
+    id: item.objectId,
+    a: 1.0, // Default discrimination (can be updated from LanguageObject.irtDiscrimination)
+    b: item.priority, // Use priority as proxy for difficulty until IRT params are set
+  }));
+}
+
+/**
+ * Apply IRT-based reordering to prioritize items matching user ability.
+ * Uses Fisher Information maximization to select optimal items.
+ */
+export function applyIRTReordering(
+  items: LearningQueueItem[],
+  userTheta: number,
+  topK: number = 10
+): LearningQueueItem[] {
+  if (items.length === 0) return [];
+
+  // Convert to IRT parameters
+  const irtItems = toItemParameters(items);
+
+  // Create lookup map for quick access
+  const itemMap = new Map(items.map((item) => [item.objectId, item]));
+
+  // Calculate Fisher Information for each item at user's theta
+  const itemsWithInfo = irtItems.map((irtItem) => ({
+    id: irtItem.id,
+    info: fisherInformation(userTheta, irtItem.a, irtItem.b),
+  }));
+
+  // Sort by information (highest first)
+  itemsWithInfo.sort((a, b) => b.info - a.info);
+
+  // Return top K items by information, then the rest by original priority
+  const selectedIds = new Set(itemsWithInfo.slice(0, topK).map((i) => i.id));
+  const selectedItems = itemsWithInfo
+    .slice(0, topK)
+    .map((i) => itemMap.get(i.id)!)
+    .filter(Boolean);
+
+  const remainingItems = items.filter((item) => !selectedIds.has(item.objectId));
+
+  return [...selectedItems, ...remainingItems];
+}
+
+/**
+ * Get the optimal next item using IRT item selection.
+ * Considers both priority and item information at current theta.
+ */
+export async function getNextItemWithIRT(
+  userId: string,
+  goalId: string,
+  usedItemIds: Set<string> = new Set()
+): Promise<LearningQueueItem | null> {
+  const db = getPrisma();
+
+  // Get user theta
+  const theta = await getUserThetaState(userId);
+
+  // Get queue with priority ordering
+  const queue = await getLearningQueue(userId, goalId, 50);
+
+  // Filter out used items
+  const availableItems = queue.filter((item) => !usedItemIds.has(item.objectId));
+
+  if (availableItems.length === 0) return null;
+
+  // Get full IRT parameters from database
+  const objectIds = availableItems.map((item) => item.objectId);
+  const objects = await db.languageObject.findMany({
+    where: { id: { in: objectIds } },
+    select: { id: true, irtDifficulty: true, irtDiscrimination: true },
+  });
+
+  const objectMap = new Map(objects.map((obj) => [obj.id, obj]));
+
+  // Build IRT item array with actual parameters
+  const irtItems: ItemParameter[] = availableItems.map((item) => {
+    const obj = objectMap.get(item.objectId);
+    return {
+      id: item.objectId,
+      a: obj?.irtDiscrimination ?? 1.0,
+      b: obj?.irtDifficulty ?? 0,
+    };
+  });
+
+  // Use IRT item selection (Fisher Information maximization)
+  const selectedIrt = selectNextItem(theta.global, irtItems, usedItemIds);
+
+  if (!selectedIrt) return availableItems[0];
+
+  // Return the corresponding queue item
+  return availableItems.find((item) => item.objectId === selectedIrt.id) ?? availableItems[0];
+}
+
+/**
+ * Get learning queue with IRT-based reordering applied.
+ */
+export async function getLearningQueueWithIRT(
+  userId: string,
+  goalId: string,
+  limit: number = 20
+): Promise<LearningQueueItem[]> {
+  // Get base queue
+  const queue = await getLearningQueue(userId, goalId, limit * 2);
+
+  // Get user theta
+  const theta = await getUserThetaState(userId);
+
+  // Apply IRT reordering
+  const reordered = applyIRTReordering(queue, theta.global, limit);
+
+  return reordered.slice(0, limit);
 }

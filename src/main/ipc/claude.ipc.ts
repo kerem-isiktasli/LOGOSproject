@@ -62,7 +62,7 @@ function getComponentRecommendation(component: string, errorRate: number): strin
  */
 export function registerClaudeHandlers(): void {
   // Generate content (exercise, explanation, example)
-  registerHandler('claude:generateContent', async (_event, request) => {
+  registerDynamicHandler('claude:generateContent', async (_event, request) => {
     const { type, objectId, context } = request as {
       type: 'exercise' | 'explanation' | 'example';
       objectId: string;
@@ -112,7 +112,7 @@ export function registerClaudeHandlers(): void {
   });
 
   // Analyze an error and store in database
-  registerHandler('claude:analyzeError', async (_event, request) => {
+  registerDynamicHandler('claude:analyzeError', async (_event, request) => {
     const { objectId, userResponse, expectedResponse, responseId } = request as {
       objectId: string;
       userResponse: string;
@@ -239,7 +239,7 @@ export function registerClaudeHandlers(): void {
   });
 
   // Get component bottlenecks for a user
-  registerHandler('claude:getBottlenecks', async (_event, request) => {
+  registerDynamicHandler('claude:getBottlenecks', async (_event, request) => {
     const { userId, goalId, limit } = request as {
       userId?: string;
       goalId?: string;
@@ -296,7 +296,7 @@ export function registerClaudeHandlers(): void {
   });
 
   // Get a hint
-  registerHandler('claude:getHint', async (_event, request) => {
+  registerDynamicHandler('claude:getHint', async (_event, request) => {
     const { objectId, hintLevel, previousHints } = request as {
       objectId: string;
       hintLevel: 1 | 2 | 3;

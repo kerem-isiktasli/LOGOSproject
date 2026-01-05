@@ -1,57 +1,587 @@
 /**
  * SessionView Component
  *
- * The main learning session container that orchestrates the learning flow.
- * Manages question progression, state transitions, and session analytics.
+ * The main task rendering interface for the Training Gym.
+ * Handles different task formats (MCQ, fill-in-blank, free response)
+ * with real-time feedback and progressive scaffolding.
  *
  * Design Philosophy:
  * - Focus mode: minimal distractions during learning
  * - Smooth transitions between question and feedback
- * - Progress always visible but not distracting
- * - Easy exit without losing progress
+ * - Clear visual hierarchy for different task types
+ * - Immediate feedback with educational error analysis
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
-import { GlassCard, GlassButton, SessionProgress, CircularProgress } from '../ui';
-import { QuestionCard, LearningItem } from './QuestionCard';
-import { FeedbackCard, FeedbackData } from './FeedbackCard';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { GlassCard, GlassButton, GlassInput, GlassTextarea, GlassBadge, MasteryBadge } from '../ui';
+import { FeedbackCard } from './FeedbackCard';
 
 // ============================================================================
 // Types
 // ============================================================================
 
+type TaskFormat = 'mcq' | 'fill_blank' | 'free_response' | 'typing';
+
+export interface SessionTask {
+  id: string;
+  objectId: string;
+  content: string;
+  type: string;
+  format: TaskFormat;
+  prompt: string;
+  expectedAnswer: string;
+  options?: string[];
+  blankTemplate?: string;
+  hints?: string[];
+  masteryStage: 0 | 1 | 2 | 3 | 4;
+  difficulty: number;
+}
+
+export interface SessionViewProps {
+  /** Current task to display */
+  task: SessionTask;
+  /** Current task index (0-based) */
+  taskIndex: number;
+  /** Total number of tasks */
+  totalTasks: number;
+  /** Submit response callback - returns correctness and error analysis */
+  onSubmit: (
+    answer: string,
+    cueLevel: 0 | 1 | 2 | 3,
+    responseTimeMs: number
+  ) => Promise<{ correct: boolean; errorAnalysis?: any } | undefined>;
+  /** Move to next task */
+  onNext: () => void;
+  /** Request a hint (level 1-3) */
+  onGetHint: (level: number) => Promise<string>;
+  /** Exit session early */
+  onExit: () => void;
+  /** Additional CSS classes */
+  className?: string;
+}
+
+type ViewPhase = 'question' | 'feedback';
+
+interface FeedbackState {
+  correct: boolean;
+  userAnswer: string;
+  expectedAnswer: string;
+  errorAnalysis?: any;
+  responseTimeMs: number;
+  cueLevel: 0 | 1 | 2 | 3;
+}
+
+// ============================================================================
+// SessionView Component
+// ============================================================================
+
+export const SessionView: React.FC<SessionViewProps> = ({
+  task,
+  taskIndex,
+  totalTasks,
+  onSubmit,
+  onNext,
+  onGetHint,
+  onExit,
+  className = '',
+}) => {
+  const [phase, setPhase] = useState<ViewPhase>('question');
+  const [answer, setAnswer] = useState('');
+  const [selectedOption, setSelectedOption] = useState<string | null>(null);
+  const [cueLevel, setCueLevel] = useState<0 | 1 | 2 | 3>(0);
+  const [hints, setHints] = useState<string[]>([]);
+  const [loadingHint, setLoadingHint] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [feedback, setFeedback] = useState<FeedbackState | null>(null);
+  const [questionStartTime, setQuestionStartTime] = useState(Date.now());
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Reset state when task changes
+  useEffect(() => {
+    setPhase('question');
+    setAnswer('');
+    setSelectedOption(null);
+    setCueLevel(0);
+    setHints([]);
+    setFeedback(null);
+    setQuestionStartTime(Date.now());
+
+    // Focus input after task change
+    setTimeout(() => {
+      if (task.format === 'free_response' || task.format === 'fill_blank') {
+        inputRef.current?.focus();
+      }
+    }, 100);
+  }, [task.id]);
+
+  // Handle answer submission
+  const handleSubmit = useCallback(async () => {
+    const responseTimeMs = Date.now() - questionStartTime;
+    const finalAnswer = task.format === 'mcq' ? selectedOption || '' : answer;
+
+    if (!finalAnswer.trim() && task.format !== 'mcq') {
+      return; // Don't submit empty answers for non-MCQ
+    }
+
+    setSubmitting(true);
+
+    try {
+      const result = await onSubmit(finalAnswer, cueLevel, responseTimeMs);
+
+      setFeedback({
+        correct: result?.correct ?? false,
+        userAnswer: finalAnswer,
+        expectedAnswer: task.expectedAnswer,
+        errorAnalysis: result?.errorAnalysis,
+        responseTimeMs,
+        cueLevel,
+      });
+
+      setPhase('feedback');
+    } catch (error) {
+      console.error('Failed to submit answer:', error);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [task, answer, selectedOption, cueLevel, questionStartTime, onSubmit]);
+
+  // Handle MCQ option selection
+  const handleOptionSelect = useCallback((option: string) => {
+    setSelectedOption(option);
+  }, []);
+
+  // Handle MCQ submission (double-click or explicit submit)
+  const handleMCQSubmit = useCallback(async (option: string) => {
+    const responseTimeMs = Date.now() - questionStartTime;
+
+    setSubmitting(true);
+    setSelectedOption(option);
+
+    try {
+      const result = await onSubmit(option, cueLevel, responseTimeMs);
+
+      setFeedback({
+        correct: result?.correct ?? false,
+        userAnswer: option,
+        expectedAnswer: task.expectedAnswer,
+        errorAnalysis: result?.errorAnalysis,
+        responseTimeMs,
+        cueLevel,
+      });
+
+      setPhase('feedback');
+    } catch (error) {
+      console.error('Failed to submit MCQ answer:', error);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [task, cueLevel, questionStartTime, onSubmit]);
+
+  // Handle hint request
+  const handleGetHint = useCallback(async () => {
+    if (cueLevel >= 3 || loadingHint) return;
+
+    setLoadingHint(true);
+
+    try {
+      const newLevel = (cueLevel + 1) as 1 | 2 | 3;
+      const hint = await onGetHint(newLevel);
+
+      setHints(prev => [...prev, hint]);
+      setCueLevel(newLevel);
+    } catch (error) {
+      console.error('Failed to get hint:', error);
+    } finally {
+      setLoadingHint(false);
+    }
+  }, [cueLevel, loadingHint, onGetHint]);
+
+  // Handle skip
+  const handleSkip = useCallback(async () => {
+    const responseTimeMs = Date.now() - questionStartTime;
+
+    setSubmitting(true);
+
+    try {
+      const result = await onSubmit('', 3, responseTimeMs);
+
+      setFeedback({
+        correct: false,
+        userAnswer: '',
+        expectedAnswer: task.expectedAnswer,
+        errorAnalysis: null,
+        responseTimeMs,
+        cueLevel: 3,
+      });
+
+      setPhase('feedback');
+    } catch (error) {
+      console.error('Failed to skip:', error);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [task, questionStartTime, onSubmit]);
+
+  // Handle continue to next
+  const handleContinue = useCallback(() => {
+    onNext();
+  }, [onNext]);
+
+  // Handle retry (same question)
+  const handleRetry = useCallback(() => {
+    setPhase('question');
+    setAnswer('');
+    setSelectedOption(null);
+    setFeedback(null);
+    setQuestionStartTime(Date.now());
+
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 100);
+  }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // In feedback phase, Enter continues
+      if (phase === 'feedback') {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleContinue();
+        }
+        return;
+      }
+
+      // In question phase
+      if (phase === 'question') {
+        // Enter submits (for non-MCQ)
+        if (e.key === 'Enter' && !e.shiftKey && task.format !== 'mcq') {
+          e.preventDefault();
+          handleSubmit();
+        }
+
+        // Number keys for MCQ selection (1-4)
+        if (task.format === 'mcq' && task.options) {
+          const num = parseInt(e.key);
+          if (num >= 1 && num <= task.options.length) {
+            e.preventDefault();
+            const option = task.options[num - 1];
+            handleMCQSubmit(option);
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [phase, task, handleSubmit, handleContinue, handleMCQSubmit]);
+
+  // Render feedback phase
+  if (phase === 'feedback' && feedback) {
+    return (
+      <div className={`session-view ${className}`}>
+        <FeedbackCard
+          feedback={{
+            correct: feedback.correct,
+            userAnswer: feedback.userAnswer,
+            correctAnswer: feedback.expectedAnswer,
+            errorAnalysis: feedback.errorAnalysis,
+            responseTimeMs: feedback.responseTimeMs,
+          }}
+          questionContent={task.content}
+          onContinue={handleContinue}
+          onRetry={!feedback.correct ? handleRetry : undefined}
+          autoAdvance={feedback.correct}
+          autoAdvanceDelay={1500}
+        />
+      </div>
+    );
+  }
+
+  // Render question phase
+  return (
+    <div className={`session-view ${className}`}>
+      <GlassCard className="task-card max-w-2xl mx-auto" padding="lg">
+        {/* Task header */}
+        <div className="task-header flex items-center justify-between mb-6 pb-4 border-b border-neutral-200/50 dark:border-neutral-700/50">
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-muted">
+              {taskIndex + 1} / {totalTasks}
+            </span>
+            <MasteryBadge stage={task.masteryStage} size="sm" />
+            <GlassBadge variant="default" size="sm">
+              {task.type}
+            </GlassBadge>
+          </div>
+          <GlassButton variant="ghost" size="sm" onClick={onExit}>
+            Exit
+          </GlassButton>
+        </div>
+
+        {/* Task content */}
+        <div className="task-content text-center mb-8">
+          <p className="text-lg text-muted mb-4">{task.prompt}</p>
+
+          {/* Display the content/question based on format */}
+          {task.format === 'fill_blank' && task.blankTemplate ? (
+            <div className="blank-template text-4xl font-bold tracking-wider mb-4">
+              {task.blankTemplate}
+            </div>
+          ) : task.format !== 'mcq' ? (
+            <div className="question-content text-3xl font-semibold mb-4">
+              {task.content}
+            </div>
+          ) : null}
+        </div>
+
+        {/* Hints section */}
+        {hints.length > 0 && (
+          <div className="hints-section mb-6">
+            {hints.map((hint, index) => (
+              <div
+                key={index}
+                className="hint-item p-3 mb-2 rounded-lg bg-blue-50 dark:bg-blue-900/20 text-sm"
+              >
+                <span className="font-medium text-blue-600 dark:text-blue-400">
+                  Hint {index + 1}:
+                </span>{' '}
+                <span className="text-blue-800 dark:text-blue-200">{hint}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Input area based on format */}
+        <div className="input-area mb-6">
+          {task.format === 'mcq' && task.options ? (
+            <MCQOptions
+              options={task.options}
+              selectedOption={selectedOption}
+              onSelect={handleOptionSelect}
+              onSubmit={handleMCQSubmit}
+              disabled={submitting}
+            />
+          ) : task.format === 'fill_blank' ? (
+            <div className="max-w-md mx-auto">
+              <GlassInput
+                ref={inputRef}
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Type your answer..."
+                size="lg"
+                disabled={submitting}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+          ) : (
+            <div className="max-w-md mx-auto">
+              <GlassInput
+                ref={inputRef}
+                value={answer}
+                onChange={(e) => setAnswer(e.target.value)}
+                placeholder="Type your answer..."
+                size="lg"
+                disabled={submitting}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Action buttons */}
+        <div className="action-buttons flex items-center justify-between">
+          <div className="left-actions">
+            {cueLevel < 3 && (
+              <GlassButton
+                variant="ghost"
+                size="sm"
+                onClick={handleGetHint}
+                disabled={loadingHint || submitting}
+              >
+                {loadingHint ? (
+                  'Getting hint...'
+                ) : (
+                  <>
+                    <HintIcon />
+                    <span className="ml-1">Hint ({3 - cueLevel} left)</span>
+                  </>
+                )}
+              </GlassButton>
+            )}
+          </div>
+
+          <div className="right-actions flex gap-2">
+            <GlassButton
+              variant="ghost"
+              onClick={handleSkip}
+              disabled={submitting}
+            >
+              Skip
+            </GlassButton>
+            {task.format !== 'mcq' && (
+              <GlassButton
+                variant="primary"
+                onClick={handleSubmit}
+                disabled={!answer.trim() || submitting}
+              >
+                {submitting ? 'Checking...' : 'Check Answer'}
+              </GlassButton>
+            )}
+          </div>
+        </div>
+
+        {/* Keyboard hint */}
+        <p className="text-center text-xs text-muted mt-4 opacity-60">
+          {task.format === 'mcq'
+            ? 'Press 1-4 to select an answer'
+            : 'Press Enter to submit'}
+        </p>
+      </GlassCard>
+
+      <style>{`
+        .task-card {
+          animation: fadeIn 0.3s ease-out;
+        }
+
+        @keyframes fadeIn {
+          from {
+            opacity: 0;
+            transform: translateY(10px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        .blank-template {
+          font-family: monospace;
+          letter-spacing: 0.3em;
+        }
+      `}</style>
+    </div>
+  );
+};
+
+// ============================================================================
+// MCQ Options Component
+// ============================================================================
+
+interface MCQOptionsProps {
+  options: string[];
+  selectedOption: string | null;
+  onSelect: (option: string) => void;
+  onSubmit: (option: string) => void;
+  disabled?: boolean;
+}
+
+const MCQOptions: React.FC<MCQOptionsProps> = ({
+  options,
+  selectedOption,
+  onSelect,
+  onSubmit,
+  disabled,
+}) => {
+  return (
+    <div className="mcq-options grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {options.map((option, index) => {
+        const isSelected = selectedOption === option;
+        const letter = String.fromCharCode(65 + index); // A, B, C, D
+
+        return (
+          <button
+            key={index}
+            onClick={() => onSubmit(option)}
+            disabled={disabled}
+            className={`
+              mcq-option
+              flex items-center gap-3 p-4 rounded-xl
+              text-left transition-all duration-200
+              border-2
+              ${isSelected
+                ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30'
+                : 'border-neutral-200 dark:border-neutral-700 hover:border-blue-300 dark:hover:border-blue-600'
+              }
+              ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:shadow-md'}
+            `}
+          >
+            <span
+              className={`
+                option-key
+                flex items-center justify-center
+                w-8 h-8 rounded-lg
+                text-sm font-bold
+                ${isSelected
+                  ? 'bg-blue-500 text-white'
+                  : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-400'
+                }
+              `}
+            >
+              {letter}
+            </span>
+            <span className="option-text flex-1 font-medium">
+              {option}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+};
+
+// ============================================================================
+// Helper Components
+// ============================================================================
+
+const HintIcon: React.FC = () => (
+  <svg className="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"
+    />
+  </svg>
+);
+
+// ============================================================================
+// Legacy exports for backward compatibility
+// ============================================================================
+
 export interface SessionConfig {
-  /** Session type */
   type: 'learn' | 'review' | 'mixed';
-  /** Target duration in minutes */
   targetDuration?: number;
-  /** Number of items to study */
   sessionSize?: number;
-  /** Time limit per question in seconds */
   questionTimeLimit?: number;
-  /** Auto-advance after correct answer */
   autoAdvance?: boolean;
-  /** Auto-advance delay in ms */
   autoAdvanceDelay?: number;
 }
 
-export interface SessionItem extends LearningItem {
-  /** Recognition options (for recognition mode) */
+export interface SessionItem {
+  id: string;
+  content: string;
+  type: string;
+  translation?: string;
+  audioUrl?: string;
+  imageUrl?: string;
+  hint?: string;
+  difficulty?: number;
+  masteryStage?: 0 | 1 | 2 | 3 | 4;
   options?: string[];
-  /** Question mode */
   mode: 'recall' | 'recognition' | 'typing' | 'listening';
-  /** Expected answer */
   expectedAnswer: string;
 }
 
 export interface SessionState {
-  /** Current phase */
   phase: 'ready' | 'question' | 'feedback' | 'complete' | 'paused';
-  /** Current item index */
   currentIndex: number;
-  /** Items in this session */
   items: SessionItem[];
-  /** Responses collected */
   responses: Array<{
     itemId: string;
     correct: boolean;
@@ -59,38 +589,8 @@ export interface SessionState {
     cueLevel: 0 | 1 | 2 | 3;
     responseTimeMs: number;
   }>;
-  /** Session start time */
   startTime: Date;
-  /** Time spent (excluding pauses) */
   elapsedMs: number;
-}
-
-export interface SessionViewProps {
-  /** Session configuration */
-  config: SessionConfig;
-  /** Items to study */
-  items: SessionItem[];
-  /** Goal information */
-  goal: {
-    id: string;
-    name: string;
-    targetLanguage: string;
-  };
-  /** Callback to check answer */
-  onCheckAnswer: (
-    itemId: string,
-    answer: string,
-    cueLevel: 0 | 1 | 2 | 3,
-    responseTimeMs: number
-  ) => Promise<FeedbackData>;
-  /** Callback to get hint */
-  onGetHint?: (itemId: string, level: number) => Promise<string>;
-  /** Callback when session completes */
-  onComplete: (stats: SessionStats) => void;
-  /** Callback to exit session early */
-  onExit: () => void;
-  /** Additional CSS classes */
-  className?: string;
 }
 
 export interface SessionStats {
@@ -102,518 +602,6 @@ export interface SessionStats {
   averageResponseTime: number;
   totalTimeMs: number;
   cueFreeAccuracy: number;
-}
-
-// ============================================================================
-// SessionView Component
-// ============================================================================
-
-export const SessionView: React.FC<SessionViewProps> = ({
-  config,
-  items,
-  goal,
-  onCheckAnswer,
-  onGetHint,
-  onComplete,
-  onExit,
-  className = '',
-}) => {
-  const [state, setState] = useState<SessionState>({
-    phase: 'ready',
-    currentIndex: 0,
-    items,
-    responses: [],
-    startTime: new Date(),
-    elapsedMs: 0,
-  });
-
-  const [currentFeedback, setCurrentFeedback] = useState<FeedbackData | null>(null);
-  const [questionStartTime, setQuestionStartTime] = useState<number>(0);
-  const [isPaused, setIsPaused] = useState(false);
-
-  // Timer for elapsed time
-  useEffect(() => {
-    if (state.phase === 'question' && !isPaused) {
-      const interval = setInterval(() => {
-        setState((prev) => ({
-          ...prev,
-          elapsedMs: prev.elapsedMs + 1000,
-        }));
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [state.phase, isPaused]);
-
-  const currentItem = state.items[state.currentIndex];
-
-  const handleStart = useCallback(() => {
-    setState((prev) => ({
-      ...prev,
-      phase: 'question',
-      startTime: new Date(),
-    }));
-    setQuestionStartTime(Date.now());
-  }, []);
-
-  const handleAnswer = useCallback(
-    async (answer: string, cueLevel: 0 | 1 | 2 | 3) => {
-      if (!currentItem) return;
-
-      const responseTimeMs = Date.now() - questionStartTime;
-
-      // Get feedback from parent
-      const feedback = await onCheckAnswer(
-        currentItem.id,
-        answer,
-        cueLevel,
-        responseTimeMs
-      );
-
-      // Record response
-      setState((prev) => ({
-        ...prev,
-        phase: 'feedback',
-        responses: [
-          ...prev.responses,
-          {
-            itemId: currentItem.id,
-            correct: feedback.correct,
-            userAnswer: answer,
-            cueLevel,
-            responseTimeMs,
-          },
-        ],
-      }));
-
-      setCurrentFeedback(feedback);
-    },
-    [currentItem, questionStartTime, onCheckAnswer]
-  );
-
-  const handleContinue = useCallback(() => {
-    const nextIndex = state.currentIndex + 1;
-
-    if (nextIndex >= state.items.length) {
-      // Session complete
-      const stats = calculateStats(state.responses, state.elapsedMs);
-      setState((prev) => ({ ...prev, phase: 'complete' }));
-      onComplete(stats);
-    } else {
-      // Next question
-      setState((prev) => ({
-        ...prev,
-        phase: 'question',
-        currentIndex: nextIndex,
-      }));
-      setQuestionStartTime(Date.now());
-      setCurrentFeedback(null);
-    }
-  }, [state.currentIndex, state.items.length, state.responses, state.elapsedMs, onComplete]);
-
-  const handleRetry = useCallback(() => {
-    setState((prev) => ({ ...prev, phase: 'question' }));
-    setQuestionStartTime(Date.now());
-    setCurrentFeedback(null);
-  }, []);
-
-  const handlePause = useCallback(() => {
-    setIsPaused(true);
-    setState((prev) => ({ ...prev, phase: 'paused' }));
-  }, []);
-
-  const handleResume = useCallback(() => {
-    setIsPaused(false);
-    setState((prev) => ({ ...prev, phase: 'question' }));
-    setQuestionStartTime(Date.now());
-  }, []);
-
-  const handleGetHint = useCallback(async () => {
-    if (!onGetHint || !currentItem) return '';
-    const currentCueLevel = state.responses.filter(
-      (r) => r.itemId === currentItem.id
-    ).length;
-    return onGetHint(currentItem.id, currentCueLevel + 1);
-  }, [onGetHint, currentItem, state.responses]);
-
-  // Ready screen
-  if (state.phase === 'ready') {
-    return (
-      <div className={`session-view session-view--ready ${className}`}>
-        <GlassCard padding="lg" className="session-ready-card">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold mb-2">Ready to Learn?</h2>
-            <p className="text-muted mb-6">
-              {goal.name} • {state.items.length} items
-            </p>
-
-            <div className="session-config mb-6">
-              <div className="config-item">
-                <span className="config-label">Session Type</span>
-                <span className="config-value capitalize">{config.type}</span>
-              </div>
-              {config.targetDuration && (
-                <div className="config-item">
-                  <span className="config-label">Target Time</span>
-                  <span className="config-value">{config.targetDuration} min</span>
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-center gap-3">
-              <GlassButton variant="ghost" onClick={onExit}>
-                Cancel
-              </GlassButton>
-              <GlassButton variant="primary" size="lg" onClick={handleStart}>
-                Start Session
-              </GlassButton>
-            </div>
-          </div>
-        </GlassCard>
-
-        <style>{`
-          .session-view--ready {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 60vh;
-          }
-
-          .session-ready-card {
-            max-width: 400px;
-            width: 100%;
-          }
-
-          .session-config {
-            display: flex;
-            justify-content: center;
-            gap: var(--space-6);
-          }
-
-          .config-item {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-          }
-
-          .config-label {
-            font-size: var(--text-xs);
-            color: hsl(var(--color-neutral-500));
-            text-transform: uppercase;
-            letter-spacing: var(--tracking-wide);
-          }
-
-          .config-value {
-            font-size: var(--text-lg);
-            font-weight: var(--font-semibold);
-          }
-        `}</style>
-      </div>
-    );
-  }
-
-  // Paused screen
-  if (state.phase === 'paused') {
-    return (
-      <div className={`session-view session-view--paused ${className}`}>
-        <GlassCard padding="lg" className="session-paused-card">
-          <div className="text-center">
-            <h2 className="text-2xl font-bold mb-4">Session Paused</h2>
-
-            <SessionProgress
-              current={state.currentIndex}
-              total={state.items.length}
-              timeElapsed={Math.floor(state.elapsedMs / 1000)}
-              targetTime={config.targetDuration ? config.targetDuration * 60 : undefined}
-              className="mb-6"
-            />
-
-            <div className="flex justify-center gap-3">
-              <GlassButton variant="ghost" onClick={onExit}>
-                End Session
-              </GlassButton>
-              <GlassButton variant="primary" onClick={handleResume}>
-                Resume
-              </GlassButton>
-            </div>
-          </div>
-        </GlassCard>
-      </div>
-    );
-  }
-
-  // Complete screen
-  if (state.phase === 'complete') {
-    const stats = calculateStats(state.responses, state.elapsedMs);
-    return (
-      <SessionComplete stats={stats} goal={goal} onClose={onExit} />
-    );
-  }
-
-  // Active session (question or feedback)
-  return (
-    <div className={`session-view ${className}`}>
-      {/* Session header */}
-      <div className="session-header">
-        <div className="session-goal">
-          <span className="text-sm text-muted">{goal.name}</span>
-        </div>
-        <SessionProgress
-          current={state.currentIndex + 1}
-          total={state.items.length}
-          timeElapsed={Math.floor(state.elapsedMs / 1000)}
-          targetTime={config.targetDuration ? config.targetDuration * 60 : undefined}
-        />
-        <GlassButton variant="ghost" size="sm" onClick={handlePause}>
-          Pause
-        </GlassButton>
-      </div>
-
-      {/* Question or Feedback */}
-      <div className="session-content">
-        {state.phase === 'question' && currentItem && (
-          <QuestionCard
-            item={currentItem}
-            mode={currentItem.mode}
-            options={currentItem.options}
-            progress={{ current: state.currentIndex + 1, total: state.items.length }}
-            timeLimit={config.questionTimeLimit}
-            onSubmit={handleAnswer}
-            onRequestHint={onGetHint ? handleGetHint : undefined}
-          />
-        )}
-
-        {state.phase === 'feedback' && currentFeedback && currentItem && (
-          <FeedbackCard
-            feedback={currentFeedback}
-            questionContent={currentItem.content}
-            onContinue={handleContinue}
-            onRetry={!currentFeedback.correct ? handleRetry : undefined}
-            autoAdvance={config.autoAdvance && currentFeedback.correct}
-            autoAdvanceDelay={config.autoAdvanceDelay}
-          />
-        )}
-      </div>
-
-      <style>{`
-        .session-view {
-          display: flex;
-          flex-direction: column;
-          min-height: 100%;
-        }
-
-        .session-header {
-          display: flex;
-          align-items: center;
-          gap: var(--space-4);
-          padding: var(--space-4);
-          margin-bottom: var(--space-4);
-        }
-
-        .session-goal {
-          flex-shrink: 0;
-        }
-
-        .session-header .session-progress {
-          flex: 1;
-        }
-
-        .session-content {
-          flex: 1;
-          display: flex;
-          align-items: flex-start;
-          justify-content: center;
-          padding: var(--space-4);
-        }
-
-        .session-view--paused {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 60vh;
-        }
-
-        .session-paused-card {
-          max-width: 400px;
-          width: 100%;
-        }
-      `}</style>
-    </div>
-  );
-};
-
-// ============================================================================
-// Session Complete Component
-// ============================================================================
-
-const SessionComplete: React.FC<{
-  stats: SessionStats;
-  goal: { name: string };
-  onClose: () => void;
-}> = ({ stats, goal, onClose }) => {
-  const grade = getGrade(stats.accuracy);
-
-  return (
-    <div className="session-complete">
-      <GlassCard padding="lg" className="session-complete-card">
-        <div className="text-center mb-6">
-          <div className="complete-icon mb-4">
-            <span className="text-5xl">🎉</span>
-          </div>
-          <h2 className="text-2xl font-bold mb-2">Session Complete!</h2>
-          <p className="text-muted">{goal.name}</p>
-        </div>
-
-        <div className="stats-grid">
-          <div className="stat-main">
-            <CircularProgress
-              value={stats.accuracy * 100}
-              size={120}
-              strokeWidth={10}
-              variant={grade.variant}
-            >
-              <div className="text-center">
-                <span className="text-3xl font-bold">{Math.round(stats.accuracy * 100)}%</span>
-                <span className="block text-sm text-muted">{grade.label}</span>
-              </div>
-            </CircularProgress>
-          </div>
-
-          <div className="stat-details">
-            <div className="stat-row">
-              <span className="stat-label">Correct</span>
-              <span className="stat-value text-success">{stats.correctCount}</span>
-            </div>
-            <div className="stat-row">
-              <span className="stat-label">Incorrect</span>
-              <span className="stat-value text-danger">{stats.incorrectCount}</span>
-            </div>
-            <div className="stat-row">
-              <span className="stat-label">Skipped</span>
-              <span className="stat-value text-muted">{stats.skippedCount}</span>
-            </div>
-            <div className="stat-row">
-              <span className="stat-label">Avg Response</span>
-              <span className="stat-value">{(stats.averageResponseTime / 1000).toFixed(1)}s</span>
-            </div>
-            <div className="stat-row">
-              <span className="stat-label">Total Time</span>
-              <span className="stat-value">{formatDuration(stats.totalTimeMs)}</span>
-            </div>
-            <div className="stat-row">
-              <span className="stat-label">Cue-Free Accuracy</span>
-              <span className="stat-value">{Math.round(stats.cueFreeAccuracy * 100)}%</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex justify-center mt-6">
-          <GlassButton variant="primary" size="lg" onClick={onClose}>
-            Done
-          </GlassButton>
-        </div>
-      </GlassCard>
-
-      <style>{`
-        .session-complete {
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          min-height: 60vh;
-        }
-
-        .session-complete-card {
-          max-width: 500px;
-          width: 100%;
-        }
-
-        .complete-icon {
-          display: inline-block;
-          animation: bounce 1s ease infinite;
-        }
-
-        .stats-grid {
-          display: flex;
-          gap: var(--space-6);
-          align-items: center;
-        }
-
-        .stat-main {
-          flex-shrink: 0;
-        }
-
-        .stat-details {
-          flex: 1;
-        }
-
-        .stat-row {
-          display: flex;
-          justify-content: space-between;
-          padding: var(--space-2) 0;
-          border-bottom: 1px solid hsl(var(--glass-border));
-        }
-
-        .stat-row:last-child {
-          border-bottom: none;
-        }
-
-        .stat-label {
-          color: hsl(var(--color-neutral-500));
-        }
-
-        .stat-value {
-          font-weight: var(--font-semibold);
-        }
-
-        @media (max-width: 500px) {
-          .stats-grid {
-            flex-direction: column;
-          }
-        }
-      `}</style>
-    </div>
-  );
-};
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-function calculateStats(
-  responses: SessionState['responses'],
-  totalTimeMs: number
-): SessionStats {
-  const correctCount = responses.filter((r) => r.correct).length;
-  const incorrectCount = responses.filter((r) => !r.correct && r.userAnswer).length;
-  const skippedCount = responses.filter((r) => !r.correct && !r.userAnswer).length;
-
-  const cueFreeResponses = responses.filter((r) => r.cueLevel === 0);
-  const cueFreeCorrect = cueFreeResponses.filter((r) => r.correct).length;
-
-  const totalResponseTime = responses.reduce((sum, r) => sum + r.responseTimeMs, 0);
-
-  return {
-    totalItems: responses.length,
-    correctCount,
-    incorrectCount,
-    skippedCount,
-    accuracy: responses.length > 0 ? correctCount / responses.length : 0,
-    averageResponseTime: responses.length > 0 ? totalResponseTime / responses.length : 0,
-    totalTimeMs,
-    cueFreeAccuracy: cueFreeResponses.length > 0 ? cueFreeCorrect / cueFreeResponses.length : 0,
-  };
-}
-
-function getGrade(accuracy: number): { label: string; variant: 'success' | 'primary' | 'warning' | 'danger' } {
-  if (accuracy >= 0.9) return { label: 'Excellent!', variant: 'success' };
-  if (accuracy >= 0.75) return { label: 'Great!', variant: 'primary' };
-  if (accuracy >= 0.6) return { label: 'Good', variant: 'warning' };
-  return { label: 'Keep practicing', variant: 'danger' };
-}
-
-function formatDuration(ms: number): string {
-  const mins = Math.floor(ms / 60000);
-  const secs = Math.floor((ms % 60000) / 1000);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
 export default SessionView;

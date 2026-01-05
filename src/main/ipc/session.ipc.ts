@@ -8,10 +8,10 @@
 import { registerHandler, success, error, validateUUID, validateRequired } from './contracts';
 import { prisma } from '../db/client';
 import { FSRS, createNewCard, updateMastery, responseToRating, determineStage } from '../../core/fsrs';
-import { analyzeBottleneck } from '../../core/bottleneck';
+import { analyzeBottleneck, ComponentType, ResponseData as BottleneckResponseData } from '../../core/bottleneck';
 import { estimateThetaMLE } from '../../core/irt';
+import { computePriority, computeUrgency, DEFAULT_PRIORITY_WEIGHTS } from '../../core/priority';
 import type { ResponseData } from '../../core/fsrs';
-import type { ResponseData as BottleneckResponse, ComponentType } from '../../core/bottleneck';
 
 // Singleton FSRS instance
 const fsrs = new FSRS();
@@ -47,8 +47,8 @@ export function registerSessionHandlers(): void {
       if (!user) {
         user = await prisma.user.create({
           data: {
-            email: 'default@logos.local',
-            name: 'Default User',
+            nativeLanguage: 'en',
+            targetLanguage: 'en',
           },
         });
       }
@@ -71,7 +71,7 @@ export function registerSessionHandlers(): void {
       // Get first task from learning queue
       const firstItem = await prisma.languageObject.findFirst({
         where: { goalId },
-        include: { mastery: true },
+        include: { masteryState: true },
         orderBy: { priority: 'desc' },
       });
 
@@ -81,7 +81,7 @@ export function registerSessionHandlers(): void {
           objectId: firstItem.id,
           content: firstItem.content,
           type: firstItem.type,
-          masteryStage: firstItem.mastery?.stage ?? 0,
+          masteryStage: firstItem.masteryState?.stage ?? 0,
         } : null,
         queueLength: await prisma.languageObject.count({ where: { goalId } }),
       });
@@ -229,36 +229,44 @@ export function registerSessionHandlers(): void {
 
       const now = new Date();
 
+      // Track old stage for transition detection
+      const oldStage = mastery?.stage ?? 0;
+      let newStage = oldStage;
+      let stageChanged = false;
+
       if (!mastery) {
         // Create new mastery state
         const newCard = createNewCard();
         const rating = responseToRating(responseData);
         const updatedCard = fsrs.schedule(newCard, rating, now);
 
+        newStage = responseData.correct ? 1 : 0;
+        stageChanged = newStage !== oldStage;
+
         mastery = await prisma.masteryState.create({
           data: {
             objectId,
-            stage: responseData.correct ? 1 : 0,
-            stability: updatedCard.stability,
-            difficulty: updatedCard.difficulty,
+            stage: newStage,
+            fsrsStability: updatedCard.stability,
+            fsrsDifficulty: updatedCard.difficulty,
             cueFreeAccuracy: cueLevel === 0 ? (correct ? 1 : 0) : 0,
             cueAssistedAccuracy: cueLevel > 0 ? (correct ? 1 : 0) : 0,
             exposureCount: 1,
-            lastReview: now,
+            fsrsLastReview: now,
             nextReview: fsrs.nextReviewDate(updatedCard),
-            reps: 1,
-            lapses: correct ? 0 : 1,
+            fsrsReps: 1,
+            fsrsLapses: correct ? 0 : 1,
           },
         });
       } else {
         // Update existing mastery
         const existingCard = {
-          difficulty: mastery.difficulty,
-          stability: mastery.stability,
-          lastReview: mastery.lastReview,
-          reps: mastery.reps,
-          lapses: mastery.lapses,
-          state: mastery.reps === 0 ? 'new' as const : 'review' as const,
+          difficulty: mastery.fsrsDifficulty,
+          stability: mastery.fsrsStability,
+          lastReview: mastery.fsrsLastReview,
+          reps: mastery.fsrsReps,
+          lapses: mastery.fsrsLapses,
+          state: mastery.fsrsReps === 0 ? 'new' as const : 'review' as const,
         };
 
         const rating = responseToRating(responseData);
@@ -277,7 +285,6 @@ export function registerSessionHandlers(): void {
 
         // Determine stage
         const gap = newCueAssistedAccuracy - newCueFreeAccuracy;
-        let newStage = mastery.stage;
 
         if (newCueFreeAccuracy >= 0.9 && updatedCard.stability > 30 && gap < 0.1) {
           newStage = 4;
@@ -289,19 +296,21 @@ export function registerSessionHandlers(): void {
           newStage = 1;
         }
 
+        stageChanged = newStage !== oldStage;
+
         mastery = await prisma.masteryState.update({
           where: { objectId },
           data: {
             stage: newStage,
-            stability: updatedCard.stability,
-            difficulty: updatedCard.difficulty,
+            fsrsStability: updatedCard.stability,
+            fsrsDifficulty: updatedCard.difficulty,
             cueFreeAccuracy: newCueFreeAccuracy,
             cueAssistedAccuracy: newCueAssistedAccuracy,
             exposureCount: mastery.exposureCount + 1,
-            lastReview: now,
+            fsrsLastReview: now,
             nextReview: fsrs.nextReviewDate(updatedCard),
-            reps: updatedCard.reps,
-            lapses: updatedCard.lapses,
+            fsrsReps: updatedCard.reps,
+            fsrsLapses: updatedCard.lapses,
           },
         });
       }
@@ -326,18 +335,110 @@ export function registerSessionHandlers(): void {
         const estimate = estimateThetaMLE(responseArray, items);
 
         await prisma.user.updateMany({
-          data: { globalTheta: estimate.theta },
+          data: { thetaGlobal: estimate.theta },
         });
+      }
+
+      // Track stage transitions in session
+      if (stageChanged) {
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: {
+            stageTransitions: { increment: 1 },
+            itemsPracticed: { increment: 1 },
+          },
+        });
+      } else {
+        await prisma.session.update({
+          where: { id: sessionId },
+          data: { itemsPracticed: { increment: 1 } },
+        });
+      }
+
+      // Recalculate priority for the language object
+      const languageObject = await prisma.languageObject.findUnique({
+        where: { id: objectId },
+      });
+
+      if (languageObject) {
+        // Get user state for priority calculation
+        const user = await prisma.user.findFirst();
+        const userTheta = user?.thetaGlobal ?? 0;
+
+        const userState = {
+          theta: userTheta,
+          weights: DEFAULT_PRIORITY_WEIGHTS,
+        };
+
+        const langObj = {
+          id: languageObject.id,
+          content: languageObject.content,
+          type: languageObject.type,
+          frequency: languageObject.frequency,
+          relationalDensity: languageObject.relationalDensity,
+          contextualContribution: languageObject.contextualContribution,
+          irtDifficulty: languageObject.irtDifficulty,
+        };
+
+        // Compute new priority with urgency factored in
+        const basePriority = computePriority(langObj, userState);
+        const urgency = computeUrgency(mastery.nextReview, now);
+        const finalPriority = basePriority * (1 + urgency);
+
+        await prisma.languageObject.update({
+          where: { id: objectId },
+          data: { priority: finalPriority },
+        });
+      }
+
+      // Update ComponentErrorStats for bottleneck tracking (if error occurred)
+      if (!correct && languageObject) {
+        const session = await prisma.session.findUnique({
+          where: { id: sessionId },
+          select: { userId: true, goalId: true },
+        });
+
+        if (session) {
+          // Map language object type to component type
+          const componentType = languageObject.type as ComponentType;
+
+          // Upsert error stats
+          await prisma.componentErrorStats.upsert({
+            where: {
+              userId_component_goalId: {
+                userId: session.userId,
+                component: componentType,
+                goalId: session.goalId,
+              },
+            },
+            create: {
+              userId: session.userId,
+              component: componentType,
+              goalId: session.goalId,
+              totalErrors: 1,
+              recentErrors: 1,
+              errorRate: 1.0,
+              trend: 0,
+            },
+            update: {
+              totalErrors: { increment: 1 },
+              recentErrors: { increment: 1 },
+            },
+          });
+        }
       }
 
       return success({
         responseId: response.id,
         mastery: {
           stage: mastery.stage,
-          stability: mastery.stability,
+          stability: mastery.fsrsStability,
           nextReview: mastery.nextReview,
           cueFreeAccuracy: mastery.cueFreeAccuracy,
         },
+        stageChanged,
+        oldStage,
+        newStage,
         fsrsRating: responseToRating(responseData),
       });
     } catch (err) {
@@ -414,7 +515,7 @@ export function registerSessionHandlers(): void {
       // Get next item based on priority and due date
       const nextItem = await prisma.languageObject.findFirst({
         where: { goalId: session.goalId },
-        include: { mastery: true },
+        include: { masteryState: true },
         orderBy: [
           { priority: 'desc' },
         ],
@@ -428,7 +529,7 @@ export function registerSessionHandlers(): void {
         objectId: nextItem.id,
         content: nextItem.content,
         type: nextItem.type,
-        masteryStage: nextItem.mastery?.stage ?? 0,
+        masteryStage: nextItem.masteryState?.stage ?? 0,
         difficulty: nextItem.irtDifficulty,
       });
     } catch (err) {
@@ -522,7 +623,7 @@ export function registerSessionHandlers(): void {
 
       const objects = await prisma.languageObject.findMany({
         where: { goalId },
-        include: { mastery: true },
+        include: { masteryState: true },
       });
 
       // Calculate stats
@@ -533,7 +634,7 @@ export function registerSessionHandlers(): void {
 
       const stageDistribution = [0, 0, 0, 0, 0];
       for (const obj of objects) {
-        const stage = obj.mastery?.stage ?? 0;
+        const stage = obj.masteryState?.stage ?? 0;
         stageDistribution[stage]++;
       }
 
@@ -564,29 +665,35 @@ export function registerSessionHandlers(): void {
     if (goalError) return error(goalError);
 
     try {
+      // Fetch responses with their related LanguageObject to get component type
       const responses = await prisma.response.findMany({
         where: {
           session: { goalId },
-          correct: false,
-          errorComponents: { not: null },
         },
         orderBy: { createdAt: 'desc' },
         take: 200,
+        include: {
+          object: {
+            select: { type: true, content: true },
+          },
+        },
       });
 
-      // Convert to bottleneck response format
-      const bottleneckResponses: BottleneckResponse[] = responses.map(r => ({
-        objectId: r.objectId,
+      // Convert to bottleneck response format using LanguageObject.type as component
+      const bottleneckResponses: BottleneckResponseData[] = responses.map(r => ({
+        id: r.id,
         correct: r.correct,
-        errorComponent: (r.errorComponents?.split(',')[0] || 'LEX') as ComponentType,
+        componentType: (r.object.type || 'LEX') as ComponentType,
+        sessionId: r.sessionId,
+        content: r.object.content,
         timestamp: r.createdAt,
-        responseTimeMs: r.responseTimeMs,
       }));
 
       const analysis = analyzeBottleneck(bottleneckResponses, {
         minResponses: minResponses ?? 10,
-        confidenceThreshold: 0.6,
-        recentWindowDays: 14,
+        minResponsesPerType: 5,
+        errorRateThreshold: 0.3,
+        cascadeConfidenceThreshold: 0.7,
       });
 
       return success(analysis);

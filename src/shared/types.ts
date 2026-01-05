@@ -10,8 +10,8 @@
  *                          +--async--> Claude API (optional)
  */
 
-// Re-export core types that are used in IPC messages
-export type {
+// Import core types that are used in IPC messages
+import type {
   // IRT
   ItemParameter,
   ThetaEstimate,
@@ -71,7 +71,6 @@ export type {
   // Users
   User,
   UserThetaProfile,
-  UserSettings,
 
   // Queue
   LearningQueueItem,
@@ -87,6 +86,24 @@ export type {
   PaginatedResult,
   DateRange,
 } from '../core/types';
+
+// Re-export all imported types
+export type {
+  ItemParameter, ThetaEstimate, IRTModel,
+  PMIResult, PMIPair, DifficultyMapping,
+  FSRSCard, FSRSParameters, FSRSRating, FSRSState, FSRSScheduleResult,
+  MasteryStage, MasteryState, MasteryResponse, ScaffoldingGap, CueLevel,
+  TaskType, TaskFormat, TaskModality, TaskSpec, TaskContent, Task,
+  SessionMode, SessionConfig, SessionState, SessionSummary,
+  FREMetrics, PriorityCalculation,
+  ComponentType, BottleneckEvidence, BottleneckAnalysis,
+  LanguageObject, LanguageObjectType,
+  GoalSpec, Domain, Modality,
+  User, UserThetaProfile,
+  LearningQueueItem,
+  ResponseEvaluation, EvaluationScores, ResponseError,
+  Result, PaginationParams, PaginatedResult, DateRange,
+};
 
 // =============================================================================
 // IPC Channel Names (Type-Safe)

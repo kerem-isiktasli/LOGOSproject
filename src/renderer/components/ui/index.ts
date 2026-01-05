@@ -34,3 +34,6 @@ export type {
   MasteryProgressProps,
   SessionProgressProps,
 } from './GlassProgress';
+
+// Logo
+export { Logo } from './Logo';

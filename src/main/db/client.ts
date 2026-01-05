@@ -47,3 +47,11 @@ process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
 export default prisma;
+
+/**
+ * Initialize the database connection
+ * Called during app startup to ensure connection is ready
+ */
+export async function initDatabase(): Promise<void> {
+  await prisma.$connect();
+}
