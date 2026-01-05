@@ -1,0 +1,245 @@
+// schema.prisma for LOGOS
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ========== USER & GOALS ==========
+
+model User {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Profile
+  nativeLanguage String
+  targetLanguage String
+
+  // Global theta estimates
+  thetaGlobal     Float    @default(0)
+  thetaPhonology  Float    @default(0)
+  thetaMorphology Float    @default(0)
+  thetaLexical    Float    @default(0)
+  thetaSyntactic  Float    @default(0)
+  thetaPragmatic  Float    @default(0)
+
+  goals    GoalSpec[]
+  sessions Session[]
+}
+
+model GoalSpec {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Goal dimensions
+  domain    String   // 'medical', 'legal', 'business'
+  modality  String   // ['reading', 'listening', 'writing', 'speaking'] stored as JSON string
+  genre     String   // 'report', 'conversation', 'presentation'
+  purpose   String   // 'certification', 'professional', 'academic'
+  benchmark String?  // 'CELBAN', 'IELTS', 'TOEFL'
+  deadline  DateTime?
+
+  // Progress
+  completionPercent Float @default(0)
+  isActive          Boolean @default(true)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  languageObjects LanguageObject[]
+  sessions        Session[]
+
+  @@index([userId, isActive])
+}
+
+// ========== LANGUAGE OBJECTS ==========
+
+model LanguageObject {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Type classification
+  type String // 'LEX', 'MORPH', 'G2P', 'SYNT', 'PRAG'
+
+  // Content
+  content     String  // The actual word/pattern/rule
+  contentJson String? // Full vector representation (JSON string for SQLite)
+
+  // FRE Metrics (computed from corpus)
+  frequency            Float // F: 0-1 normalized
+  relationalDensity    Float // R: hub score
+  contextualContribution Float // E: meaning importance
+
+  // Computed priority (denormalized for query speed)
+  priority Float @default(0)
+
+  // IRT parameters
+  irtDifficulty      Float @default(0)
+  irtDiscrimination  Float @default(1)
+
+  goalId String
+  goal   GoalSpec @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  masteryState MasteryState?
+  responses    Response[]
+  collocations Collocation[] @relation("word1")
+  collocatedBy Collocation[] @relation("word2")
+
+  @@index([goalId, type])
+  @@index([goalId, priority(sort: Desc)])
+}
+
+model Collocation {
+  id String @id @default(uuid())
+
+  word1Id String
+  word1   LanguageObject @relation("word1", fields: [word1Id], references: [id], onDelete: Cascade)
+
+  word2Id String
+  word2   LanguageObject @relation("word2", fields: [word2Id], references: [id], onDelete: Cascade)
+
+  // PMI statistics
+  pmi          Float
+  npmi         Float
+  cooccurrence Int
+  significance Float
+
+  @@unique([word1Id, word2Id])
+  @@index([word1Id])
+  @@index([word2Id])
+}
+
+// ========== MASTERY STATE ==========
+
+model MasteryState {
+  id String @id @default(uuid())
+
+  // Current stage (0-4)
+  stage Int @default(0)
+
+  // FSRS parameters
+  fsrsDifficulty   Float    @default(5)
+  fsrsStability    Float    @default(0)
+  fsrsLastReview   DateTime?
+  fsrsReps         Int      @default(0)
+  fsrsLapses       Int      @default(0)
+  fsrsState        String   @default("new")
+
+  // Accuracy tracking
+  cueFreeAccuracy    Float @default(0)
+  cueAssistedAccuracy Float @default(0)
+  exposureCount      Int   @default(0)
+
+  // Scheduling
+  nextReview DateTime?
+  priority   Float    @default(0)
+
+  objectId String         @unique
+  object   LanguageObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@index([nextReview])
+  @@index([priority(sort: Desc)])
+}
+
+// ========== SESSIONS & RESPONSES ==========
+
+model Session {
+  id        String   @id @default(uuid())
+  startedAt DateTime @default(now())
+  endedAt   DateTime?
+
+  // Session type
+  mode String // 'learning', 'training', 'evaluation'
+
+  // Metrics
+  itemsPracticed    Int @default(0)
+  stageTransitions  Int @default(0)
+  fluencyTaskCount  Int @default(0)
+  versatilityTaskCount Int @default(0)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  goalId String
+  goal   GoalSpec @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  responses Response[]
+  thetaSnapshots ThetaSnapshot[]
+
+  @@index([userId, startedAt(sort: Desc)])
+}
+
+model Response {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Task metadata
+  taskType   String  // 'recognition', 'recall', 'production', 'timed'
+  taskFormat String  // 'mcq', 'fill_blank', 'free_response'
+  modality   String  // 'visual', 'auditory', 'mixed'
+
+  // Response data
+  correct       Boolean
+  responseTimeMs Int
+  cueLevel      Int     @default(0) // 0 = cue-free, 1-3 = assisted
+
+  // Raw response (for analysis)
+  responseContent String?
+  expectedContent String?
+
+  // IRT scoring (evaluation mode only)
+  irtThetaContribution Float?
+
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  objectId String
+  object   LanguageObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([objectId, createdAt(sort: Desc)])
+}
+
+model ThetaSnapshot {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Theta values at this point
+  thetaGlobal     Float
+  thetaPhonology  Float
+  thetaMorphology Float
+  thetaLexical    Float
+  thetaSyntactic  Float
+  thetaPragmatic  Float
+
+  // Standard errors
+  seGlobal Float
+
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+// ========== CACHED CONTENT ==========
+
+model CachedTask {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  objectId  String
+  taskType  String
+  taskFormat String
+
+  // Cached Claude-generated content (JSON string for SQLite)
+  taskContent String
+
+  @@unique([objectId, taskType, taskFormat])
+  @@index([expiresAt])
+}
