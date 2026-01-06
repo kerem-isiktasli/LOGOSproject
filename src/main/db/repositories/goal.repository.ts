@@ -3,10 +3,13 @@
  *
  * Data access layer for GoalSpec and related operations.
  * Implements Phase 2.1: Goal Management.
+ *
+ * Enhanced with automatic morphological/phonological score calculation.
  */
 
 import type { GoalSpec, LanguageObject, Prisma } from '@prisma/client';
 import { getPrisma } from '../prisma';
+import { computeMorphologicalScore, getMorphologicalComplexity } from '../../../core/morphology';
 
 // =============================================================================
 // Types
@@ -218,6 +221,12 @@ export async function calculateGoalProgress(goalId: string): Promise<GoalProgres
 
 /**
  * Add language objects to a goal.
+ * Automatically calculates morphological and phonological scores if not provided.
+ *
+ * @param goalId - Goal to add objects to
+ * @param objects - Array of object definitions
+ * @param options - Additional options for score calculation
+ * @returns Number of objects created
  */
 export async function addLanguageObjectsToGoal(
   goalId: string,
@@ -230,32 +239,110 @@ export async function addLanguageObjectsToGoal(
     domainDistribution?: Record<string, number>;
     morphologicalScore?: number;
     phonologicalDifficulty?: number;
+    pragmaticScore?: number;
     priority?: number;
     irtDifficulty?: number;
     irtDiscrimination?: number;
-  }>
+  }>,
+  options?: {
+    domain?: string;
+    autoCalculateScores?: boolean;
+  }
 ): Promise<number> {
   const db = getPrisma();
+  const autoCalculate = options?.autoCalculateScores !== false; // Default true
+  const domain = options?.domain;
 
   const result = await db.languageObject.createMany({
-    data: objects.map((obj) => ({
-      goalId,
-      type: obj.type,
-      content: obj.content,
-      frequency: obj.frequency,
-      relationalDensity: obj.relationalDensity,
-      contextualContribution: obj.contextualContribution,
-      domainDistribution: obj.domainDistribution ? JSON.stringify(obj.domainDistribution) : null,
-      morphologicalScore: obj.morphologicalScore,
-      phonologicalDifficulty: obj.phonologicalDifficulty,
-      priority: obj.priority ?? 0,
-      irtDifficulty: obj.irtDifficulty ?? 0,
-      irtDiscrimination: obj.irtDiscrimination ?? 1,
-    })),
+    data: objects.map((obj) => {
+      // Auto-calculate morphological score if not provided
+      let morphScore = obj.morphologicalScore;
+      if (morphScore === undefined && autoCalculate && obj.type === 'LEX') {
+        try {
+          morphScore = computeMorphologicalScore(obj.content, domain);
+        } catch {
+          morphScore = 0.5; // Default for calculation failures
+        }
+      }
+
+      // Auto-calculate phonological difficulty if not provided
+      let phonScore = obj.phonologicalDifficulty;
+      if (phonScore === undefined && autoCalculate && obj.type === 'LEX') {
+        phonScore = calculatePhonologicalDifficulty(obj.content);
+      }
+
+      return {
+        goalId,
+        type: obj.type,
+        content: obj.content,
+        frequency: obj.frequency,
+        relationalDensity: obj.relationalDensity,
+        contextualContribution: obj.contextualContribution,
+        domainDistribution: obj.domainDistribution ? JSON.stringify(obj.domainDistribution) : null,
+        morphologicalScore: morphScore,
+        phonologicalDifficulty: phonScore,
+        pragmaticScore: obj.pragmaticScore,
+        priority: obj.priority ?? 0,
+        irtDifficulty: obj.irtDifficulty ?? 0,
+        irtDiscrimination: obj.irtDiscrimination ?? 1,
+      };
+    }),
     skipDuplicates: true,
   });
 
   return result.count;
+}
+
+/**
+ * Calculate phonological difficulty score for a word.
+ * Based on syllable count, consonant clusters, and orthographic transparency.
+ *
+ * @param word - Word to analyze
+ * @returns Phonological difficulty score (0-1, higher = more difficult)
+ */
+function calculatePhonologicalDifficulty(word: string): number {
+  const lowerWord = word.toLowerCase();
+
+  // 1. Syllable count (rough estimate using vowel sequences)
+  const vowels = lowerWord.match(/[aeiouy]+/g) || [];
+  const syllableCount = Math.max(1, vowels.length);
+
+  // More syllables = harder (normalized to ~0.5 for 3 syllables)
+  const syllableScore = Math.min(1, syllableCount / 6);
+
+  // 2. Consonant cluster complexity
+  const clusters = lowerWord.match(/[bcdfghjklmnpqrstvwxz]{3,}/g) || [];
+  const clusterScore = Math.min(1, clusters.length * 0.3);
+
+  // 3. Orthographic irregularities (silent letters, unusual patterns)
+  const irregularPatterns = [
+    /ght/, // fight, thought
+    /ough/, // through, though, cough
+    /ph/, // phone
+    /ch/, // character vs chair
+    /gn/, // gnome
+    /kn/, // knife
+    /wr/, // write
+    /mb$/, // climb
+    /mn$/, // autumn
+    /tion/, // action
+    /sion/, // vision
+  ];
+
+  const irregularityCount = irregularPatterns.filter(p => p.test(lowerWord)).length;
+  const irregularityScore = Math.min(1, irregularityCount * 0.15);
+
+  // 4. Word length factor
+  const lengthScore = Math.min(1, lowerWord.length / 15);
+
+  // 5. Combine scores with weights
+  const difficulty =
+    syllableScore * 0.25 +
+    clusterScore * 0.25 +
+    irregularityScore * 0.30 +
+    lengthScore * 0.20;
+
+  return Math.min(1, Math.max(0, difficulty));
 }
 
 /**

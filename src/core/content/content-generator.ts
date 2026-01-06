@@ -294,12 +294,34 @@ Return JSON with:
   }
 
   /**
-   * Call Claude API (placeholder - would use ClaudeService).
+   * Call Claude API via IPC to main process.
+   * Uses the ClaudeService exposed through window.logos.
    */
   private async callClaudeAPI(prompt: string, timeout: number): Promise<string> {
-    // This is a placeholder - in production, this would call the actual API
-    // through the ClaudeService in main process
-    throw new Error('AI generation not implemented - use template fallback');
+    // Check if we're in renderer context with logos API available
+    if (typeof window !== 'undefined' && (window as any).logos?.claude) {
+      try {
+        const result = await Promise.race([
+          (window as any).logos.claude.generateContent('exercise', prompt, prompt),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('AI generation timeout')), timeout)
+          ),
+        ]);
+
+        // Extract the content from the response
+        if (result && typeof result === 'object' && 'content' in result) {
+          return result.content;
+        }
+        return JSON.stringify(result);
+      } catch (err) {
+        throw new Error(
+          `AI generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`
+        );
+      }
+    }
+
+    // If not in renderer or API not available, throw to trigger template fallback
+    throw new Error('Claude API not available - use template fallback');
   }
 
   /**

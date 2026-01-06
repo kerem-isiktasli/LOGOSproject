@@ -5,10 +5,9 @@
  * Learning objects are the atomic units of learning (words, phrases, grammar).
  */
 
-import { registerHandler, success, error, validateRequired, validateNonEmpty, validateUUID, validateRange } from './contracts';
+import { registerHandler, success, error, validateNonEmpty, validateUUID } from './contracts';
 import { prisma } from '../db/client';
-import { computePriority, buildLearningQueue, getSessionItems, inferLevel, getWeightsForLevel } from '../../core/priority';
-import { computeUrgency } from '../../core/priority';
+import { buildLearningQueue, getSessionItems, inferLevel, getWeightsForLevel } from '../../core/priority';
 import type { LanguageObject, UserState, MasteryInfo, QueueItem } from '../../core/priority';
 
 // ============================================================================
@@ -25,7 +24,6 @@ export function registerLearningHandlers(): void {
       goalId,
       content,
       type,
-      translation,
       frequency,
       relationalDensity,
       contextualContribution,
@@ -35,7 +33,6 @@ export function registerLearningHandlers(): void {
       goalId: string;
       content: string;
       type: string;
-      translation?: string;
       frequency?: number;
       relationalDensity?: number;
       contextualContribution?: number;
@@ -83,7 +80,7 @@ export function registerLearningHandlers(): void {
     try {
       const object = await prisma.languageObject.findUnique({
         where: { id },
-        include: { mastery: true },
+        include: { masteryState: true },
       });
 
       if (!object) {
@@ -115,7 +112,7 @@ export function registerLearningHandlers(): void {
           goalId,
           ...(type ? { type } : {}),
         },
-        include: { mastery: true },
+        include: { masteryState: true },
         take: limit || 100,
         skip: offset || 0,
         orderBy: { createdAt: 'desc' },
@@ -257,13 +254,13 @@ export function registerLearningHandlers(): void {
 
     try {
       // Get user profile for theta
-      const profile = await prisma.userProfile.findFirst();
-      const theta = profile?.globalTheta ?? 0;
+      const user = await prisma.user.findFirst();
+      const theta = user?.thetaGlobal ?? 0;
 
       // Get all objects with mastery
       const objects = await prisma.languageObject.findMany({
         where: { goalId },
-        include: { mastery: true },
+        include: { masteryState: true },
       });
 
       // Convert to core types
@@ -280,11 +277,11 @@ export function registerLearningHandlers(): void {
       // Build mastery map
       const masteryMap = new Map<string, MasteryInfo>();
       for (const obj of objects) {
-        if (obj.mastery) {
+        if (obj.masteryState) {
           masteryMap.set(obj.id, {
-            stage: obj.mastery.stage,
-            nextReview: obj.mastery.nextReview,
-            cueFreeAccuracy: obj.mastery.cueFreeAccuracy,
+            stage: obj.masteryState.stage,
+            nextReview: obj.masteryState.nextReview,
+            cueFreeAccuracy: obj.masteryState.cueFreeAccuracy,
           });
         }
       }
@@ -294,7 +291,7 @@ export function registerLearningHandlers(): void {
       const userState: UserState = {
         theta,
         weights: getWeightsForLevel(level),
-        l1Language: profile?.nativeLanguage || undefined,
+        l1Language: user?.nativeLanguage || undefined,
       };
 
       // Build and get session items
@@ -327,7 +324,7 @@ export function registerLearningHandlers(): void {
           ...(query ? { content: { contains: query } } : {}),
           ...(type ? { type } : {}),
         },
-        include: { mastery: true },
+        include: { masteryState: true },
         take: limit || 50,
         orderBy: { priority: 'desc' },
       });
@@ -419,12 +416,12 @@ export function registerLearningHandlers(): void {
 
     // Just rebuild the queue - same as build but indicates intent
     try {
-      const profile = await prisma.userProfile.findFirst();
-      const theta = profile?.globalTheta ?? 0;
+      const user = await prisma.user.findFirst();
+      const theta = user?.thetaGlobal ?? 0;
 
       const objects = await prisma.languageObject.findMany({
         where: { goalId },
-        include: { mastery: true },
+        include: { masteryState: true },
       });
 
       const languageObjects: LanguageObject[] = objects.map(obj => ({
@@ -439,11 +436,11 @@ export function registerLearningHandlers(): void {
 
       const masteryMap = new Map<string, MasteryInfo>();
       for (const obj of objects) {
-        if (obj.mastery) {
+        if (obj.masteryState) {
           masteryMap.set(obj.id, {
-            stage: obj.mastery.stage,
-            nextReview: obj.mastery.nextReview,
-            cueFreeAccuracy: obj.mastery.cueFreeAccuracy,
+            stage: obj.masteryState.stage,
+            nextReview: obj.masteryState.nextReview,
+            cueFreeAccuracy: obj.masteryState.cueFreeAccuracy,
           });
         }
       }
@@ -452,7 +449,7 @@ export function registerLearningHandlers(): void {
       const userState: UserState = {
         theta,
         weights: getWeightsForLevel(level),
-        l1Language: profile?.nativeLanguage || undefined,
+        l1Language: user?.nativeLanguage || undefined,
       };
 
       const queue = buildLearningQueue(languageObjects, userState, masteryMap, new Date());
@@ -487,7 +484,7 @@ function mapObjectToResponse(object: {
   irtDifficulty: number;
   priority?: number;
   createdAt: Date;
-  mastery?: {
+  masteryState?: {
     stage: number;
     nextReview: Date | null;
     cueFreeAccuracy: number;
@@ -505,10 +502,10 @@ function mapObjectToResponse(object: {
     priority: object.priority ?? 0,
     contentJson: object.contentJson ? JSON.parse(object.contentJson) : undefined,
     createdAt: object.createdAt,
-    mastery: object.mastery ? {
-      stage: object.mastery.stage,
-      nextReview: object.mastery.nextReview,
-      cueFreeAccuracy: object.mastery.cueFreeAccuracy,
+    mastery: object.masteryState ? {
+      stage: object.masteryState.stage,
+      nextReview: object.masteryState.nextReview,
+      cueFreeAccuracy: object.masteryState.cueFreeAccuracy,
     } : undefined,
   };
 }

@@ -49,11 +49,13 @@ export {
   shouldBeFluencyTask,
   generateTaskSpec,
   generateTask,
-  generateMCQOptions,
   generateHints,
   getCachedTask,
   cacheTask,
   getOrGenerateTask,
+  // Claude-enhanced
+  generateTaskWithClaude,
+  getOrGenerateTaskWithClaude,
 } from './task-generation.service';
 
 // Layer 3: Scoring + Update
@@ -107,3 +109,107 @@ export {
   clearCalculatorCache,
   clearAllCalculatorCaches,
 } from './pmi.service';
+
+// Corpus Sources Registry
+export {
+  // Types
+  type SourceType,
+  type AccessMethod,
+  type CorpusSource,
+  // Functions
+  getEnabledSources,
+  getSourceById,
+  getSourcesByType,
+  getSourcesByDomain,
+  getSourcesByBenchmark,
+  getSourcesByModality,
+  CORPUS_SOURCES,
+} from './corpus-sources/registry';
+
+// Corpus Source Filter
+export {
+  // Types
+  type SourceFilter,
+  type RankedSource,
+  type GoalSpec as FilterGoalSpec,
+  // Functions
+  filterSources,
+  rankSourcesForGoal,
+  getSourcesForBenchmark,
+  getSourcesForDomain,
+  getSourcesForModalities,
+  getRecommendedSources,
+  getDefaultSourceIds,
+  validateSourceSelection,
+} from './corpus-sources/filter';
+
+// Corpus Pipeline Service
+export {
+  // Types
+  type PopulationOptions,
+  type VocabularyItem,
+  type PopulationResult,
+  type CorpusDocument,
+  type ExtractionResult,
+  // Functions
+  populateVocabularyForGoal,
+  processUserUploads,
+  getPopulationStatus,
+  clearVocabulary,
+} from './corpus-sources/corpus-pipeline.service';
+
+// Offline Queue Service
+export {
+  // Types
+  type QueueItemType,
+  type QueueItemStatus,
+  type QueueItem,
+  type OfflineQueueStats,
+  // Functions
+  getOfflineQueueService,
+  resetOfflineQueueService,
+  queueTaskGeneration,
+  queueErrorAnalysis,
+  queueContentGeneration,
+} from './offline-queue.service';
+
+// Claude API Service
+export {
+  // Types
+  type ClaudeConfig,
+  type ContentRequest,
+  type ErrorAnalysisRequest,
+  type HintRequest,
+  type ContentResponse,
+  type ErrorAnalysisResponse,
+  type HintResponse,
+  // Functions
+  getClaudeService,
+  ClaudeService,
+} from './claude.service';
+
+// Agent Trigger Service
+export {
+  // Types
+  type BottleneckType,
+  type AgentType,
+  type TriggerContext,
+  type DevelopmentBottleneck,
+  type AgentTrigger,
+  type TriggerResult,
+  // Functions
+  getAgentTriggerService,
+  detectAgentTriggers,
+  registerBottleneck,
+} from './agent-trigger.service';
+
+// Agent Hooks Service
+export {
+  // Types
+  type OperationType,
+  type OperationContext,
+  type HookResult,
+  // Functions
+  createOperationHook,
+  wrapWithAgentDetection,
+} from './agent-hooks.service';

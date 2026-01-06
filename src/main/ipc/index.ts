@@ -10,6 +10,8 @@ import { registerLearningHandlers, unregisterLearningHandlers } from './learning
 import { registerSessionHandlers, unregisterSessionHandlers } from './session.ipc';
 import { registerClaudeHandlers, unregisterClaudeHandlers } from './claude.ipc';
 import { registerAgentHandlers, unregisterAgentHandlers } from './agent.ipc';
+import { registerSyncHandlers, unregisterSyncHandlers } from './sync.ipc';
+import { registerOnboardingHandlers, unregisterOnboardingHandlers } from './onboarding.ipc';
 
 /**
  * Register all IPC handlers.
@@ -33,6 +35,12 @@ export function registerAllHandlers(): void {
   registerAgentHandlers();
   console.log('[IPC] Agent handlers registered');
 
+  registerSyncHandlers();
+  console.log('[IPC] Sync handlers registered');
+
+  registerOnboardingHandlers();
+  console.log('[IPC] Onboarding handlers registered');
+
   console.log('[IPC] All handlers registered successfully');
 }
 
@@ -48,6 +56,8 @@ export function unregisterAllHandlers(): void {
   unregisterSessionHandlers();
   unregisterClaudeHandlers();
   unregisterAgentHandlers();
+  unregisterSyncHandlers();
+  unregisterOnboardingHandlers();
 
   console.log('[IPC] All handlers unregistered');
 }
@@ -58,4 +68,6 @@ export { registerLearningHandlers, unregisterLearningHandlers } from './learning
 export { registerSessionHandlers, unregisterSessionHandlers } from './session.ipc';
 export { registerClaudeHandlers, unregisterClaudeHandlers } from './claude.ipc';
 export { registerAgentHandlers, unregisterAgentHandlers } from './agent.ipc';
+export { registerSyncHandlers, unregisterSyncHandlers } from './sync.ipc';
+export { registerOnboardingHandlers, unregisterOnboardingHandlers } from './onboarding.ipc';
 export * from './contracts';

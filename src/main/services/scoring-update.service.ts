@@ -25,11 +25,13 @@ import {
 import {
   createErrorAnalysis,
   recalculateComponentStats,
+  detectBottlenecks,
   type ComponentCode,
 } from '../db/repositories/error-analysis.repository';
 import { updateObjectPriority } from '../db/repositories/goal.repository';
 import type { GeneratedTask, TaskSpec } from './task-generation.service';
 import { calculateEffectivePriority, calculateMasteryAdjustment, calculateUrgencyScore } from './state-priority.service';
+import { calibrateItems } from '../../core/irt';
 
 // =============================================================================
 // Types
@@ -231,13 +233,18 @@ function analyzeError(
 // Mastery State Updates
 // =============================================================================
 
+// Maximum scaffolding gap allowed for Stage 3→4 promotion
+const MAX_GAP_FOR_AUTOMATIC = 0.15;
+
 /**
- * Determine if stage should change based on accuracy.
+ * Determine if stage should change based on accuracy and scaffolding gap.
+ * For Stage 3→4 (Automatic), requires scaffolding gap < 0.15.
  */
 function determineStageTransition(
   currentStage: number,
   cueFreeAccuracy: number,
-  cueAssistedAccuracy: number
+  cueAssistedAccuracy: number,
+  scaffoldingGap?: number
 ): { newStage: number; changed: boolean } {
   const thresholds = STAGE_THRESHOLDS[currentStage as keyof typeof STAGE_THRESHOLDS];
 
@@ -247,6 +254,15 @@ function determineStageTransition(
 
   // Check for promotion
   if (currentStage < 4 && cueFreeAccuracy >= thresholds.promote) {
+    // Special check for Stage 3→4: must have low scaffolding gap
+    // This ensures the learner can perform WITHOUT cue assistance
+    if (currentStage === 3) {
+      const gap = scaffoldingGap ?? (cueAssistedAccuracy - cueFreeAccuracy);
+      if (gap > MAX_GAP_FOR_AUTOMATIC) {
+        // Gap too high - learner still depends on cues
+        return { newStage: currentStage, changed: false };
+      }
+    }
     return { newStage: currentStage + 1, changed: true };
   }
 
@@ -447,11 +463,19 @@ export async function processResponse(
     updatedMastery.cueAssistedAccuracy - updatedMastery.cueFreeAccuracy
   );
   const urgencyScore = calculateUrgencyScore(fsrsUpdate.nextReview);
+
+  // Check if this object's component is a bottleneck
+  const componentCode = mapTypeToComponent(object.type);
+  const bottlenecks = await detectBottlenecks(userId, object.goalId);
+  const isBottleneck = bottlenecks.some(
+    (b) => b.component === componentCode && b.isBottleneck
+  );
+
   const newPriority = calculateEffectivePriority(
     object.priority * 0.8, // Decay base priority slightly
     masteryAdjustment,
     urgencyScore,
-    false // TODO: check bottleneck status
+    isBottleneck
   );
 
   await updateObjectPriority(spec.objectId, newPriority);
@@ -590,4 +614,162 @@ export function summarizeOutcomes(outcomes: ResponseOutcome[]): {
     averageResponseTime: 0, // Would need response times
     thetaChange,
   };
+}
+
+// =============================================================================
+// IRT Calibration Trigger
+// =============================================================================
+
+// Minimum responses per item before calibration
+const MIN_RESPONSES_FOR_CALIBRATION = 10;
+
+// Cache for tracking response counts per item
+const itemResponseCounts = new Map<string, number>();
+
+/**
+ * Check if IRT calibration should be triggered for an item.
+ * Calibration runs when an item accumulates enough responses.
+ */
+export async function checkAndTriggerCalibration(
+  objectId: string,
+  goalId: string
+): Promise<{ calibrated: boolean; newDifficulty?: number; newDiscrimination?: number }> {
+  const prisma = getPrisma();
+
+  // Increment response count
+  const currentCount = (itemResponseCounts.get(objectId) ?? 0) + 1;
+  itemResponseCounts.set(objectId, currentCount);
+
+  // Only calibrate when threshold is reached
+  if (currentCount < MIN_RESPONSES_FOR_CALIBRATION) {
+    return { calibrated: false };
+  }
+
+  // Reset counter
+  itemResponseCounts.set(objectId, 0);
+
+  try {
+    // Fetch all responses for this item
+    const responses = await prisma.response.findMany({
+      where: {
+        objectId,
+        session: { goalId },
+      },
+      select: {
+        correct: true,
+        responseTimeMs: true,
+        session: {
+          select: { userId: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100, // Last 100 responses
+    });
+
+    if (responses.length < MIN_RESPONSES_FOR_CALIBRATION) {
+      return { calibrated: false };
+    }
+
+    // Group responses by user for ability estimation
+    const userResponses = new Map<string, { correct: boolean; itemId: string }[]>();
+    for (const r of responses) {
+      const userId = r.session.userId;
+      if (!userResponses.has(userId)) {
+        userResponses.set(userId, []);
+      }
+      userResponses.get(userId)!.push({
+        correct: r.correct,
+        itemId: objectId,
+      });
+    }
+
+    // Build response patterns for calibration
+    const responsePatterns: { thetaEstimate: number; responses: { itemId: string; correct: boolean }[] }[] = [];
+
+    for (const [userId, userResps] of userResponses) {
+      // Get user's current theta as ability estimate
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { thetaGlobal: true },
+      });
+
+      if (user) {
+        responsePatterns.push({
+          thetaEstimate: user.thetaGlobal,
+          responses: userResps,
+        });
+      }
+    }
+
+    if (responsePatterns.length < 5) {
+      return { calibrated: false };
+    }
+
+    // Convert response patterns to boolean matrix for calibrateItems
+    // Each row is a person, each column is an item (in this case, single item)
+    const responseMatrix: boolean[][] = responsePatterns.map((pattern) => {
+      // For single item calibration, each person has one response
+      const correct = pattern.responses.find((r) => r.itemId === objectId)?.correct ?? false;
+      return [correct];
+    });
+
+    // Run IRT calibration
+    const calibrationResult = calibrateItems(responseMatrix);
+
+    if (calibrationResult.length > 0) {
+      const newParams = calibrationResult[0];
+
+      // Update database with new parameters
+      await prisma.languageObject.update({
+        where: { id: objectId },
+        data: {
+          irtDifficulty: newParams.b,
+          irtDiscrimination: newParams.a,
+        },
+      });
+
+      return {
+        calibrated: true,
+        newDifficulty: newParams.b,
+        newDiscrimination: newParams.a,
+      };
+    }
+  } catch (err) {
+    console.error('IRT calibration failed:', err);
+  }
+
+  return { calibrated: false };
+}
+
+/**
+ * Trigger calibration for all items in a goal after session end.
+ */
+export async function triggerSessionEndCalibration(goalId: string): Promise<number> {
+  const prisma = getPrisma();
+  let calibratedCount = 0;
+
+  try {
+    // Get items with enough responses
+    const itemsWithResponses = await prisma.response.groupBy({
+      by: ['objectId'],
+      where: {
+        session: { goalId },
+      },
+      _count: { objectId: true },
+      having: {
+        objectId: { _count: { gte: MIN_RESPONSES_FOR_CALIBRATION } },
+      },
+    });
+
+    for (const item of itemsWithResponses) {
+      const result = await checkAndTriggerCalibration(item.objectId, goalId);
+      if (result.calibrated) {
+        calibratedCount++;
+      }
+    }
+  } catch (err) {
+    console.error('Session end calibration failed:', err);
+  }
+
+  return calibratedCount;
 }

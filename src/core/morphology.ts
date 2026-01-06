@@ -884,7 +884,8 @@ export function buildMultiLayerWordCard(
  */
 export function analyzeMorphology(
   word: string,
-  domain?: string
+  domain?: string,
+  maxPasses: number = 3
 ): MorphologicalAnalysis {
   const normalized = word.toLowerCase().trim();
   const prefixes: Affix[] = [];
@@ -892,40 +893,61 @@ export function analyzeMorphology(
   let remaining = normalized;
   let derivationType: DerivationType = 'simple';
 
-  // Check for prefixes (longest match first)
+  // Sorted affix lists for matching
   const sortedPrefixes = Object.entries(ENGLISH_PREFIXES)
     .sort((a, b) => b[0].length - a[0].length);
-
-  for (const [prefix, affix] of sortedPrefixes) {
-    if (remaining.startsWith(prefix) && remaining.length > prefix.length + 2) {
-      // Domain filtering
-      if (!domain || !affix.domains || affix.domains.includes(domain) || affix.domains.includes('general')) {
-        prefixes.push(affix);
-        remaining = remaining.slice(prefix.length);
-        derivationType = 'derived';
-      }
-    }
-  }
-
-  // Check for suffixes (longest match first)
   const sortedSuffixes = Object.entries(ENGLISH_SUFFIXES)
     .sort((a, b) => b[0].length - a[0].length);
 
-  for (const [suffix, affix] of sortedSuffixes) {
-    if (remaining.endsWith(suffix) && remaining.length > suffix.length + 2) {
-      if (!domain || !affix.domains || affix.domains.includes(domain) || affix.domains.includes('general')) {
-        suffixes.unshift(affix); // Add to front (innermost first)
-        remaining = remaining.slice(0, -suffix.length);
-        derivationType = 'derived';
+  // Multi-pass prefix extraction (e.g., "anti-re-" or "un-pre-")
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let foundPrefix = false;
+    for (const [prefix, affix] of sortedPrefixes) {
+      if (remaining.startsWith(prefix) && remaining.length > prefix.length + 2) {
+        // Domain filtering
+        if (!domain || !affix.domains || affix.domains.includes(domain) || affix.domains.includes('general')) {
+          prefixes.push(affix);
+          remaining = remaining.slice(prefix.length);
+          derivationType = 'derived';
+          foundPrefix = true;
+          break; // Found one prefix this pass, continue to next pass
+        }
       }
     }
+    if (!foundPrefix) break; // No more prefixes to extract
   }
+
+  // Multi-pass suffix extraction (e.g., "-able-ity" or "-ation-al")
+  // Work from outermost to innermost
+  for (let pass = 0; pass < maxPasses; pass++) {
+    let foundSuffix = false;
+    for (const [suffix, affix] of sortedSuffixes) {
+      if (remaining.endsWith(suffix) && remaining.length > suffix.length + 2) {
+        if (!domain || !affix.domains || affix.domains.includes(domain) || affix.domains.includes('general')) {
+          suffixes.unshift(affix); // Add to front (innermost first)
+          remaining = remaining.slice(0, -suffix.length);
+          derivationType = 'derived';
+          foundSuffix = true;
+          break; // Found one suffix this pass, continue to next pass
+        }
+      }
+    }
+    if (!foundSuffix) break; // No more suffixes to extract
+  }
+
+  // Handle spelling changes that may have occurred during derivation
+  remaining = normalizeRoot(remaining);
 
   // Detect inflection
   const inflection = detectInflection(normalized, remaining);
 
   // If both prefix and suffix, it's complex
   if (prefixes.length > 0 && suffixes.length > 0) {
+    derivationType = 'complex';
+  }
+
+  // If multiple affixes of same type, it's also complex
+  if (prefixes.length > 1 || suffixes.length > 1) {
     derivationType = 'complex';
   }
 
@@ -953,6 +975,37 @@ export function analyzeMorphology(
     morphemeCount,
     difficultyScore
   };
+}
+
+/**
+ * Normalize root after affix stripping.
+ * Handles common spelling changes during derivation.
+ */
+function normalizeRoot(root: string): string {
+  // Handle doubled consonants (e.g., "runn" -> "run")
+  if (root.length >= 3 && root[root.length - 1] === root[root.length - 2]) {
+    const potentialRoot = root.slice(0, -1);
+    // Keep doubled consonants if they're part of common patterns
+    const keepDoubled = ['ll', 'ss', 'ff', 'zz', 'cc'];
+    if (!keepDoubled.includes(root.slice(-2))) {
+      return potentialRoot;
+    }
+  }
+
+  // Handle y -> i transformation (e.g., "happi" -> "happy")
+  if (root.endsWith('i') && root.length >= 3) {
+    const consonants = 'bcdfghjklmnpqrstvwxyz';
+    if (consonants.includes(root[root.length - 2])) {
+      return root.slice(0, -1) + 'y';
+    }
+  }
+
+  // Handle dropped 'e' (e.g., "believ" -> "believe")
+  if (root.length >= 3 && !root.match(/[aeiou]$/)) {
+    // Could have dropped 'e' - return as is since we can't be certain
+  }
+
+  return root;
 }
 
 /**

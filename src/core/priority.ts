@@ -6,7 +6,15 @@
  *
  * From THEORETICAL-FOUNDATIONS.md and FINAL-SPEC.md
  * Formula: Priority = (w_F × F + w_R × R + w_E × E) / Cost
+ *
+ * Enhanced with:
+ * - Pragmatics difficulty integration
+ * - L1-L2 transfer coefficient adjustment
+ * - Morphological/phonological complexity factors
  */
+
+import { calculatePragmaticDifficulty, type PragmaticProfile } from './pragmatics';
+import { calculateTransferGain, getTransferCoefficients } from './transfer';
 
 // ============================================================================
 // Types
@@ -125,17 +133,32 @@ export function computeCost(factors: CostFactors): number {
 
 /**
  * Estimate cost factors for a language object given user state.
+ *
+ * Uses real L1-L2 transfer coefficients when available.
  */
 export function estimateCostFactors(
   object: LanguageObject,
-  userState: UserState
+  userState: UserState,
+  targetLanguage: string = 'en'
 ): CostFactors {
   // Base difficulty from IRT (normalize from logit scale)
   const baseDifficulty = (object.irtDifficulty + 3) / 6; // -3 to +3 → 0 to 1
 
-  // Transfer gain (placeholder - would use L1-L2 matrix in full implementation)
-  // For now, assume 0.1 base transfer for related languages
-  const transferGain = userState.l1Language ? 0.1 : 0;
+  // Transfer gain using real coefficients
+  let transferGain = 0;
+  if (userState.l1Language) {
+    try {
+      // Get transfer gain based on object type and languages
+      transferGain = calculateTransferGain(
+        userState.l1Language,
+        targetLanguage,
+        object.type
+      );
+    } catch {
+      // Fallback if transfer module not available
+      transferGain = 0.1;
+    }
+  }
 
   // Exposure need based on ability gap
   // If theta is much lower than difficulty, need more exposure
@@ -341,4 +364,229 @@ export function inferLevel(theta: number): 'beginner' | 'intermediate' | 'advanc
   if (theta < -1) return 'beginner';
   if (theta < 1) return 'intermediate';
   return 'advanced';
+}
+
+// ============================================================================
+// Enhanced Priority with Pragmatics & Transfer
+// ============================================================================
+
+/**
+ * Extended language object with additional properties for enhanced priority.
+ */
+export interface ExtendedLanguageObject extends LanguageObject {
+  /** Morphological complexity score (0-1) */
+  morphologicalScore?: number;
+  /** Phonological difficulty (0-1) */
+  phonologicalScore?: number;
+  /** Domain distribution (domain -> relevance) */
+  domainDistribution?: Record<string, number>;
+  /** Pragmatic profile if available */
+  pragmaticProfile?: PragmaticProfile;
+}
+
+/**
+ * Extended cost factors including pragmatics.
+ */
+export interface ExtendedCostFactors extends CostFactors {
+  /** Pragmatic complexity (0-1) */
+  pragmaticDifficulty: number;
+  /** Morphological complexity modifier */
+  morphologicalModifier: number;
+  /** Phonological difficulty modifier */
+  phonologicalModifier: number;
+}
+
+/**
+ * Configuration for enhanced priority calculation.
+ */
+export interface EnhancedPriorityConfig {
+  /** Target language */
+  targetLanguage: string;
+  /** User's current domain focus (e.g., 'medical', 'business') */
+  focusDomain?: string;
+  /** Whether to penalize pragmatically complex items for beginners */
+  pragmaticPenalty: boolean;
+  /** Weight for morphological complexity in cost (0-1) */
+  morphologicalWeight: number;
+  /** Weight for phonological complexity in cost (0-1) */
+  phonologicalWeight: number;
+  /** Weight for pragmatic complexity in cost (0-1) */
+  pragmaticWeight: number;
+}
+
+/**
+ * Default enhanced priority configuration.
+ */
+export const DEFAULT_ENHANCED_CONFIG: EnhancedPriorityConfig = {
+  targetLanguage: 'en',
+  pragmaticPenalty: true,
+  morphologicalWeight: 0.15,
+  phonologicalWeight: 0.10,
+  pragmaticWeight: 0.20,
+};
+
+/**
+ * Compute extended cost factors including pragmatics and complexity scores.
+ *
+ * @param object - Extended language object
+ * @param userState - Current user state
+ * @param config - Enhanced priority configuration
+ * @returns Extended cost factors
+ */
+export function computeExtendedCostFactors(
+  object: ExtendedLanguageObject,
+  userState: UserState,
+  config: EnhancedPriorityConfig = DEFAULT_ENHANCED_CONFIG
+): ExtendedCostFactors {
+  // Get base cost factors
+  const baseCost = estimateCostFactors(object, userState, config.targetLanguage);
+
+  // Pragmatic difficulty
+  let pragmaticDifficulty = 0;
+  if (object.pragmaticProfile) {
+    pragmaticDifficulty = calculatePragmaticDifficulty(object.pragmaticProfile);
+
+    // Apply beginner penalty for high pragmatic items
+    if (config.pragmaticPenalty && userState.theta < 0) {
+      // Beginners struggle more with pragmatically complex items
+      pragmaticDifficulty *= 1 + Math.abs(userState.theta) * 0.5;
+    }
+  }
+
+  // Morphological modifier (higher = harder)
+  const morphologicalModifier = object.morphologicalScore ?? 0.5;
+
+  // Phonological modifier (higher = harder)
+  const phonologicalModifier = object.phonologicalScore ?? 0.5;
+
+  return {
+    ...baseCost,
+    pragmaticDifficulty: Math.min(1, pragmaticDifficulty),
+    morphologicalModifier,
+    phonologicalModifier,
+  };
+}
+
+/**
+ * Compute enhanced cost incorporating all complexity factors.
+ *
+ * EnhancedCost = BaseCost + (MorphWeight × Morph) + (PhonWeight × Phon) + (PragWeight × Prag)
+ *
+ * @param factors - Extended cost factors
+ * @param config - Configuration with weights
+ * @returns Enhanced cost value
+ */
+export function computeEnhancedCost(
+  factors: ExtendedCostFactors,
+  config: EnhancedPriorityConfig = DEFAULT_ENHANCED_CONFIG
+): number {
+  const baseCost = factors.baseDifficulty - factors.transferGain + factors.exposureNeed;
+
+  const complexityPenalty =
+    config.morphologicalWeight * factors.morphologicalModifier +
+    config.phonologicalWeight * factors.phonologicalModifier +
+    config.pragmaticWeight * factors.pragmaticDifficulty;
+
+  return Math.max(0.1, baseCost + complexityPenalty);
+}
+
+/**
+ * Compute enhanced priority with all factors.
+ *
+ * This is the full S_eff(w) calculation from the spec:
+ *   Priority = FRE / EnhancedCost × DomainRelevance
+ *
+ * @param object - Extended language object
+ * @param userState - Current user state
+ * @param config - Enhanced priority configuration
+ * @returns Enhanced priority value with breakdown
+ */
+export function computeEnhancedPriority(
+  object: ExtendedLanguageObject,
+  userState: UserState,
+  config: EnhancedPriorityConfig = DEFAULT_ENHANCED_CONFIG
+): {
+  priority: number;
+  fre: number;
+  cost: number;
+  domainBoost: number;
+  breakdown: {
+    baseDifficulty: number;
+    transferGain: number;
+    pragmaticDifficulty: number;
+    morphologicalModifier: number;
+    phonologicalModifier: number;
+  };
+} {
+  // Compute FRE
+  const metrics: FREMetrics = {
+    frequency: object.frequency,
+    relationalDensity: object.relationalDensity,
+    contextualContribution: object.contextualContribution,
+  };
+  const fre = computeFRE(metrics, userState.weights);
+
+  // Compute extended cost
+  const costFactors = computeExtendedCostFactors(object, userState, config);
+  const cost = computeEnhancedCost(costFactors, config);
+
+  // Domain relevance boost
+  let domainBoost = 1.0;
+  if (config.focusDomain && object.domainDistribution) {
+    const domainRelevance = object.domainDistribution[config.focusDomain] ?? 0;
+    // Boost items relevant to focus domain (up to 50% boost)
+    domainBoost = 1 + domainRelevance * 0.5;
+  }
+
+  const priority = (fre / cost) * domainBoost;
+
+  return {
+    priority,
+    fre,
+    cost,
+    domainBoost,
+    breakdown: {
+      baseDifficulty: costFactors.baseDifficulty,
+      transferGain: costFactors.transferGain,
+      pragmaticDifficulty: costFactors.pragmaticDifficulty,
+      morphologicalModifier: costFactors.morphologicalModifier,
+      phonologicalModifier: costFactors.phonologicalModifier,
+    },
+  };
+}
+
+/**
+ * Build enhanced learning queue with all priority factors.
+ *
+ * @param objects - Extended language objects
+ * @param userState - Current user state
+ * @param masteryMap - Map of object ID to mastery info
+ * @param now - Current time
+ * @param config - Enhanced priority configuration
+ * @returns Sorted queue items with enhanced scores
+ */
+export function buildEnhancedLearningQueue(
+  objects: ExtendedLanguageObject[],
+  userState: UserState,
+  masteryMap: Map<string, MasteryInfo>,
+  now: Date,
+  config: EnhancedPriorityConfig = DEFAULT_ENHANCED_CONFIG
+): QueueItem[] {
+  const items: QueueItem[] = objects.map(object => {
+    const { priority } = computeEnhancedPriority(object, userState, config);
+    const masteryInfo = masteryMap.get(object.id);
+    const urgency = computeUrgency(masteryInfo?.nextReview ?? null, now);
+    const finalScore = computeFinalScore(priority, urgency);
+
+    return {
+      object,
+      priority,
+      urgency,
+      finalScore,
+      masteryInfo,
+    };
+  });
+
+  // Sort by final score (highest first)
+  return items.sort((a, b) => b.finalScore - a.finalScore);
 }

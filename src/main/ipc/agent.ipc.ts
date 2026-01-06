@@ -18,7 +18,7 @@ import {
   type DevelopmentBottleneck,
   type AgentType,
   type BottleneckType,
-} from '../services/agent-trigger';
+} from '../services/agent-trigger.service';
 
 // ============================================================================
 // Handler Registration

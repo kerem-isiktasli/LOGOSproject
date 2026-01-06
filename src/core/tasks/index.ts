@@ -21,6 +21,9 @@ export {
   getReceptiveTaskTypes,
   calculateTaskSuitability,
   selectOptimalTaskType,
+  // z(w) vector task selection (Gap 2.2)
+  getTasksForFeatureVector,
+  selectOptimalTaskTypeWithFeatureVector,
 } from './traditional-task-types';
 
 // Task Constraint Solver

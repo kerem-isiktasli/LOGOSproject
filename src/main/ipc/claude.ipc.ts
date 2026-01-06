@@ -7,8 +7,8 @@
 
 import { registerDynamicHandler, success, error, validateUUID, validateNonEmpty } from './contracts';
 import { prisma } from '../db/client';
-import { getClaudeService } from '../services/claude';
-import type { ContentRequest, ErrorAnalysisRequest, HintRequest } from '../services/claude';
+import { getClaudeService } from '../services/claude.service';
+import type { ContentRequest, ErrorAnalysisRequest, HintRequest } from '../services/claude.service';
 
 // ============================================================================
 // Helper Functions

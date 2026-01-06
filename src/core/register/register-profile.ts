@@ -51,7 +51,8 @@ export type PragmaticFunction =
   | 'emphasizing'
   | 'narrating'
   | 'describing'
-  | 'explaining';
+  | 'explaining'
+  | 'suggesting';
 
 /**
  * Register formality level.

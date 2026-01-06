@@ -42,6 +42,8 @@ export interface PriorityWeights {
   domain: number;         // D weight
   morphological: number;  // M weight
   phonological: number;   // P weight
+  syntactic: number;      // SYNT weight - Lu (2010, 2011) L2SCA complexity
+  pragmatic: number;      // Pragmatic/register fit weight
   urgency: number;        // Review urgency weight
   bottleneck: number;     // Bottleneck boost weight
 }
@@ -68,14 +70,27 @@ export interface QueueAnalysis {
   componentDistribution: Record<string, number>;
 }
 
+/**
+ * Default priority weights for the FRE formula.
+ *
+ * Weight distribution rationale (sum = 1.0):
+ * - Linguistic features (F, R, D, M, P, SYNT, PRAG): 72% - core learning priority
+ * - Scheduling factors (urgency, bottleneck): 28% - temporal adjustments
+ *
+ * References:
+ * - Lu, X. (2010, 2011) for syntactic complexity weighting
+ * - Nation (2006) for frequency/relational importance
+ */
 const DEFAULT_WEIGHTS: PriorityWeights = {
-  frequency: 0.20,
-  relational: 0.15,
-  domain: 0.15,
-  morphological: 0.10,
-  phonological: 0.10,
-  urgency: 0.20,
-  bottleneck: 0.10,
+  frequency: 0.16,       // F: corpus frequency - foundation of vocabulary selection
+  relational: 0.12,      // R: hub connectivity - network centrality
+  domain: 0.12,          // D: domain relevance - goal alignment
+  morphological: 0.08,   // M: morphological productivity
+  phonological: 0.08,    // P: phonological difficulty (L1-L2 transfer)
+  syntactic: 0.08,       // SYNT: syntactic complexity (Lu L2SCA)
+  pragmatic: 0.08,       // PRAG: register/pragmatic fit
+  urgency: 0.18,         // Temporal: review scheduling priority
+  bottleneck: 0.10,      // Adaptive: error pattern boosting
 };
 
 // =============================================================================
@@ -131,6 +146,17 @@ export function getThetaForComponent(
 
 /**
  * Calculate base priority S_base(w) from z(w) vector.
+ *
+ * Implements the complete 7-dimension linguistic feature vector:
+ * z(w) = [F, R, D, M, P, SYNT, PRAG]
+ *
+ * Each dimension is normalized to [0, 1] and weighted according to
+ * empirical importance for L2 acquisition.
+ *
+ * References:
+ * - Nation (2006): Frequency and collocational importance
+ * - Lu (2010, 2011): Syntactic complexity metrics (L2SCA)
+ * - Crossley et al. (2011): Domain and register effects
  */
 export function calculateBasePriority(
   object: {
@@ -139,73 +165,118 @@ export function calculateBasePriority(
     domainDistribution: string | null;
     morphologicalScore: number | null;
     phonologicalDifficulty: number | null;
+    syntacticComplexity?: number | null;
+    pragmaticScore?: number | null;
   },
   targetDomain: string,
+  targetRegister?: string,
   weights: PriorityWeights = DEFAULT_WEIGHTS
 ): number {
-  // F: Frequency (higher = more important)
+  // F: Frequency (higher = more important for acquisition)
+  // Log-normalized corpus frequency, range [0, 1]
   const F = object.frequency;
 
-  // R: Relational density (higher = more connections)
+  // R: Relational density (hub score, PMI-weighted centrality)
+  // Higher values indicate more collocational connections
   const R = object.relationalDensity;
 
-  // D: Domain relevance (how much in target domain)
+  // D: Domain relevance (distribution in target domain)
   let D = 0.5; // Default if no domain data
   if (object.domainDistribution) {
     try {
-      const domains = JSON.parse(object.domainDistribution);
+      const domains = typeof object.domainDistribution === 'string'
+        ? JSON.parse(object.domainDistribution)
+        : object.domainDistribution;
       D = domains[targetDomain] ?? 0.5;
     } catch {
       D = 0.5;
     }
   }
 
-  // M: Morphological complexity (inverted - higher complexity = higher priority)
+  // M: Morphological complexity
+  // familySize × productivity × log(familyFrequencySum)
   const M = object.morphologicalScore ?? 0.5;
 
-  // P: Phonological difficulty (inverted - higher difficulty = higher priority)
+  // P: Phonological difficulty
+  // g2pEntropy + syllableComplexity + errorPronePatterns
   const P = object.phonologicalDifficulty ?? 0.5;
 
-  // Weighted sum
+  // SYNT: Syntactic complexity (Lu, 2010, 2011)
+  // Based on L2SCA metrics: MLC, CN/C, DC/C normalized to [0, 1]
+  // Higher complexity items may need more practice but also offer more learning value
+  const SYNT = object.syntacticComplexity ?? 0.5;
+
+  // PRAG: Pragmatic/register fit score
+  // registerVariance + contextSensitivity + formalityRange
+  const PRAG = object.pragmaticScore ?? 0.5;
+
+  // Weighted sum of all 7 z(w) dimensions
+  // Note: urgency and bottleneck weights are applied separately in calculateEffectivePriority
   const S_base =
     weights.frequency * F +
     weights.relational * R +
     weights.domain * D +
     weights.morphological * M +
-    weights.phonological * P;
+    weights.phonological * P +
+    weights.syntactic * SYNT +
+    weights.pragmatic * PRAG;
 
   return Math.min(1, Math.max(0, S_base));
 }
 
 /**
+ * Continuous g(m) function based on mastery level.
+ * Implements inverted U-curve from DEVELOPMENT-PROTOCOL.md:
+ * - g(m < 0.2) = 0.5 (Foundation lacking)
+ * - g(m ∈ [0.2, 0.7]) = 0.8-1.0 (Optimal zone - ZPD)
+ * - g(m > 0.9) = 0.3 (Mastered)
+ */
+export function calculateMasteryFunction(mastery: number): number {
+  if (mastery < 0.2) {
+    // Foundation lacking - moderate priority
+    return 0.5;
+  } else if (mastery <= 0.7) {
+    // Optimal learning zone (ZPD) - highest priority
+    // Linear interpolation from 0.8 at m=0.2 to 1.0 at m=0.45, then back to 0.8 at m=0.7
+    // Peak at m=0.45 (exactly in middle of ZPD)
+    const midpoint = 0.45;
+    if (mastery <= midpoint) {
+      return 0.8 + (mastery - 0.2) * (0.2 / (midpoint - 0.2)); // 0.8 to 1.0
+    } else {
+      return 1.0 - (mastery - midpoint) * (0.2 / (0.7 - midpoint)); // 1.0 to 0.8
+    }
+  } else if (mastery <= 0.9) {
+    // Getting easier - declining priority
+    return 0.8 - (mastery - 0.7) * (0.5 / 0.2); // 0.8 to 0.3
+  } else {
+    // Mastered - low priority (maintenance only)
+    return 0.3;
+  }
+}
+
+/**
  * Calculate mastery adjustment g(m) for Zone of Proximal Development.
  * Items slightly above current ability get highest priority.
+ * Now uses continuous g(m) function based on actual mastery level.
  */
 export function calculateMasteryAdjustment(
   stage: number,
   cueFreeAccuracy: number,
   scaffoldingGap: number
 ): number {
-  // Stage-based factor: prioritize items in active learning stages
-  const stageFactor = [1.0, 0.9, 0.7, 0.5, 0.3][stage] ?? 0.3;
+  // Convert accuracy to mastery estimate (0-1 scale)
+  // Use combination of stage and accuracy for more accurate mastery
+  const stageMastery = stage / 4; // 0, 0.25, 0.5, 0.75, 1.0
+  const mastery = (stageMastery + cueFreeAccuracy) / 2;
 
-  // Accuracy-based factor: prioritize items with moderate difficulty
-  // Items with 40-70% accuracy are in ZPD
-  let accuracyFactor: number;
-  if (cueFreeAccuracy < 0.4) {
-    accuracyFactor = 0.8; // Too hard, but still important
-  } else if (cueFreeAccuracy < 0.7) {
-    accuracyFactor = 1.0; // In ZPD - highest priority
-  } else if (cueFreeAccuracy < 0.9) {
-    accuracyFactor = 0.6; // Getting easier
-  } else {
-    accuracyFactor = 0.3; // Mastered
-  }
+  // Use continuous g(m) function
+  const masteryFactor = calculateMasteryFunction(mastery);
 
   // Scaffolding gap factor: items with high gap need more practice
+  // High gap (>0.3) indicates cue-dependency, boost priority
   const gapFactor = 1 + scaffoldingGap * 0.5;
 
-  return stageFactor * accuracyFactor * gapFactor;
+  return masteryFactor * gapFactor;
 }
 
 /**
@@ -230,6 +301,9 @@ export function calculateUrgencyScore(nextReview: Date | null): number {
 
 /**
  * Calculate effective priority S_eff(w).
+ *
+ * Combines base priority with mastery adjustment, urgency, and bottleneck boost.
+ * Output is clamped to [0, 1] range for consistency with IRT scale expectations.
  */
 export function calculateEffectivePriority(
   basePriority: number,
@@ -241,7 +315,10 @@ export function calculateEffectivePriority(
   const urgencyComponent = weights.urgency * urgencyScore;
   const bottleneckBoost = isBottleneck ? weights.bottleneck : 0;
 
-  return basePriority * masteryAdjustment + urgencyComponent + bottleneckBoost;
+  const rawPriority = basePriority * masteryAdjustment + urgencyComponent + bottleneckBoost;
+
+  // Clamp to [0, 1] range for consistency
+  return Math.min(1, Math.max(0, rawPriority));
 }
 
 // =============================================================================
@@ -285,6 +362,7 @@ export async function recalculatePriorities(
     const basePriority = calculateBasePriority(
       obj,
       goal.domain,
+      undefined, // No target register filter
       weights
     );
 
@@ -464,13 +542,43 @@ export async function getStateAnalysis(
 // =============================================================================
 
 /**
+ * Transform priority (0-1) to IRT difficulty scale (logit, -3 to +3).
+ *
+ * IRT difficulty parameter b follows the logit scale where:
+ * - b = -3: very easy item (95% correct for average ability)
+ * - b = 0: average difficulty (50% correct for average ability)
+ * - b = +3: very hard item (5% correct for average ability)
+ *
+ * Reference: Baker, F. B., & Kim, S. H. (2004). Item Response Theory:
+ * Parameter Estimation Techniques (2nd ed.). Marcel Dekker.
+ *
+ * @param priority - Priority value in [0, 1] range
+ * @returns IRT difficulty b in [-3, +3] range (logit scale)
+ */
+function priorityToIRTDifficulty(priority: number): number {
+  // Linear transformation: priority [0, 1] → b [-3, +3]
+  // priority 0 → b -3 (easy)
+  // priority 0.5 → b 0 (medium)
+  // priority 1 → b +3 (hard)
+  return 6 * priority - 3;
+}
+
+/**
  * Convert learning queue items to IRT item parameters.
+ *
+ * Note: The b parameter must be on the logit scale (-3 to +3), not the
+ * priority scale (0-1). If irtDifficulty is not available, we transform
+ * priority to the IRT scale using linear mapping.
+ *
+ * Reference: Baker & Kim (2004) - Item Response Theory
  */
 function toItemParameters(items: LearningQueueItem[]): ItemParameter[] {
   return items.map((item) => ({
     id: item.objectId,
     a: 1.0, // Default discrimination (can be updated from LanguageObject.irtDiscrimination)
-    b: item.priority, // Use priority as proxy for difficulty until IRT params are set
+    // Transform priority (0-1) to IRT b scale (-3 to +3)
+    // This is a fallback; getNextItemWithIRT uses actual irtDifficulty when available
+    b: priorityToIRTDifficulty(item.priority),
   }));
 }
 

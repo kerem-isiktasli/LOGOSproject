@@ -19,9 +19,17 @@
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {
+      "@core": ["src/core/index.ts"],
       "@core/*": ["src/core/*"],
+      "@main": ["src/main/index.ts"],
       "@main/*": ["src/main/*"],
+      "@main/services": ["src/main/services/index.ts"],
+      "@main/services/*": ["src/main/services/*"],
+      "@renderer": ["src/renderer/App.tsx"],
       "@renderer/*": ["src/renderer/*"],
+      "@renderer/components": ["src/renderer/components/index.ts"],
+      "@renderer/components/*": ["src/renderer/components/*"],
+      "@shared": ["src/shared/types.ts"],
       "@shared/*": ["src/shared/*"]
     }
   },

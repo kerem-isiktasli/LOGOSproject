@@ -93,6 +93,19 @@ model LanguageObject {
   // Computed as: g2pEntropy + syllableComplexity + errorPronePatterns
   phonologicalDifficulty Float?
 
+  // PRAG: Pragmatic/Register Score
+  // Computed as: registerVariance + contextSensitivity + formalityRange
+  pragmaticScore Float?
+
+  // SYNT: Syntactic Complexity Score (Lu, 2010, 2011)
+  // Based on L2 Syntactic Complexity Analyzer metrics:
+  // - MLC (Mean Length of Clause): clausal elaboration
+  // - CN/C (Complex Nominals per Clause): phrasal complexity
+  // - DC/C (Dependent Clauses per Clause): subordination amount
+  // Normalized to 0-1 scale
+  // Reference: Lu, X. (2010). Automatic analysis of syntactic complexity in second language writing.
+  syntacticComplexity Float?
+
   // ========== Computed Values ==========
   // Computed priority using S_eff formula
   priority Float @default(0)
@@ -114,6 +127,7 @@ model LanguageObject {
   @@index([goalId, priority(sort: Desc)])
   @@index([goalId, morphologicalScore])
   @@index([goalId, phonologicalDifficulty])
+  @@index([goalId, syntacticComplexity])
 }
 
 model Collocation {
@@ -330,4 +344,34 @@ model ComponentErrorStats {
 
   @@unique([userId, component, goalId])
   @@index([userId, errorRate(sort: Desc)])
+}
+
+// ========== OFFLINE QUEUE ==========
+
+model OfflineQueueItem {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  processedAt DateTime?
+
+  // Item type
+  type String // 'task_generation', 'error_analysis', 'content_generation', 'vocabulary_extraction'
+
+  // Payload (JSON string for SQLite)
+  payload String
+
+  // Status
+  status String @default("pending") // 'pending', 'processing', 'completed', 'failed'
+
+  // Retry tracking
+  retryCount Int @default(0)
+  maxRetries Int @default(3)
+
+  // Error message (if failed)
+  error String?
+
+  // Result (JSON string, if completed)
+  result String?
+
+  @@index([status, createdAt])
+  @@index([type, status])
 }

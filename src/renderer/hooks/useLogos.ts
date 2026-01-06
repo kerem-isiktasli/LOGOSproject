@@ -446,6 +446,85 @@ export function useGetHint() {
   return { getHint, loading };
 }
 
+// ============================================================================
+// Onboarding Hooks
+// ============================================================================
+
+interface OnboardingStatus {
+  needsOnboarding: boolean;
+  hasUser: boolean;
+  hasGoals: boolean;
+  userId?: string;
+}
+
+interface OnboardingData {
+  nativeLanguage: string;
+  targetLanguage: string;
+  domain: string;
+  modality: string[];
+  purpose: string;
+  benchmark?: string;
+  deadline?: string;
+  dailyTime: number;
+}
+
+interface OnboardingResult {
+  userId: string;
+  goalId: string;
+  nativeLanguage: string;
+  targetLanguage: string;
+  domain: string;
+  modality: string[];
+  purpose: string;
+}
+
+export function useOnboardingStatus() {
+  return useAsync<OnboardingStatus>(
+    () => logos?.onboarding?.checkStatus() ?? Promise.resolve({ needsOnboarding: false, hasUser: true, hasGoals: true }),
+    []
+  );
+}
+
+export function useCompleteOnboarding() {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const complete = useCallback(async (data: OnboardingData): Promise<OnboardingResult | null> => {
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await logos?.onboarding?.complete(data);
+      setLoading(false);
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to complete onboarding';
+      setError(message);
+      setLoading(false);
+      throw err;
+    }
+  }, []);
+
+  return { complete, loading, error };
+}
+
+export function useSkipOnboarding() {
+  const [loading, setLoading] = useState(false);
+
+  const skip = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await logos?.onboarding?.skip();
+      setLoading(false);
+      return result;
+    } catch (err) {
+      setLoading(false);
+      throw err;
+    }
+  }, []);
+
+  return { skip, loading };
+}
+
 export default {
   useGoals, useGoal, useCreateGoal, useUpdateGoal, useDeleteGoal,
   useObjects, useCreateObject, useImportObjects,
@@ -454,4 +533,5 @@ export default {
   useProgress, useBottlenecks, useSessionStats,
   useMastery, useMasteryStats,
   useGenerateContent, useAnalyzeError, useGetHint,
+  useOnboardingStatus, useCompleteOnboarding, useSkipOnboarding,
 };

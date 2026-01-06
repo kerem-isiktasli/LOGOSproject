@@ -397,11 +397,25 @@ export const DEFAULT_STAGE_THRESHOLDS: StageThresholds = {
  * Types of learning tasks
  */
 export type TaskType =
-  | 'recognition'    // Identify correct option (MCQ)
-  | 'recall_cued'    // Recall with partial cue
-  | 'recall_free'    // Recall without cues
-  | 'production'     // Generate/produce language
-  | 'timed';         // Time-pressured response
+  | 'recognition'           // Identify correct option (MCQ)
+  | 'recall_cued'           // Recall with partial cue
+  | 'recall_free'           // Recall without cues
+  | 'production'            // Generate/produce language
+  | 'timed'                 // Time-pressured response
+  // Extended task types for content generation
+  | 'fill_blank'            // Fill in the blank
+  | 'definition_match'      // Match word to definition
+  | 'translation'           // Translation task
+  | 'sentence_writing'      // Write a sentence using word
+  | 'reading_comprehension' // Read and answer questions
+  | 'rapid_response'        // Quick response (fluency)
+  | 'error_correction'      // Find and fix errors
+  | 'collocation'           // Complete collocations
+  | 'word_formation'        // Form words from roots
+  | 'register_shift'        // Change register/formality
+  // Syntactic complexity tasks (Lu, 2010, 2011)
+  | 'sentence_combining'    // Combine simple sentences into complex ones
+  | 'clause_selection';     // Select appropriate subordinate/coordinate clause
 
 /**
  * Task presentation formats
@@ -412,7 +426,8 @@ export type TaskFormat =
   | 'free_response'  // Open-ended response
   | 'matching'       // Match items
   | 'ordering'       // Order items correctly
-  | 'dictation';     // Listen and write
+  | 'dictation'      // Listen and write
+  | 'typing';        // Character-by-character typing with real-time validation
 
 /**
  * Input/output modality for tasks
@@ -420,7 +435,9 @@ export type TaskFormat =
 export type TaskModality =
   | 'visual'         // Reading/text
   | 'auditory'       // Listening
-  | 'mixed';         // Both
+  | 'mixed'          // Both
+  | 'text'           // Alias for visual (used in content-spec)
+  | 'audio';         // Alias for auditory (used in task types)
 
 /**
  * Task specification (what to generate)
@@ -695,11 +712,17 @@ export const DEFAULT_PRIORITY_WEIGHTS: PriorityWeights = {
  * Follows the theoretical cascade: PHON -> MORPH -> LEX -> SYNT -> PRAG
  */
 export type ComponentType =
-  | 'PHON'   // Phonology
-  | 'MORPH'  // Morphology
-  | 'LEX'    // Lexical
-  | 'SYNT'   // Syntactic
-  | 'PRAG';  // Pragmatic
+  | 'PHON'        // Phonology
+  | 'MORPH'       // Morphology
+  | 'LEX'         // Lexical
+  | 'SYNT'        // Syntactic
+  | 'PRAG'        // Pragmatic
+  // Lowercase aliases for compatibility
+  | 'phonological'
+  | 'morphological'
+  | 'lexical'
+  | 'syntactic'
+  | 'pragmatic';
 
 /**
  * Evidence for a bottleneck in a specific component
@@ -829,6 +852,24 @@ export interface LanguageObject {
 
   /** Associated goal ID */
   goalId: string;
+
+  /** Translation in user's native language */
+  translation?: string;
+
+  /** Domain distribution (JSON string or object) */
+  domainDistribution?: string | Record<string, number>;
+
+  /** Frequency score (0-1) */
+  frequency?: number;
+
+  /** Relational density / PMI score (0-1) */
+  relationalDensity?: number;
+
+  /** Morphological complexity score (0-1) */
+  morphologicalScore?: number;
+
+  /** Phonological difficulty score (0-1) */
+  phonologicalDifficulty?: number;
 }
 
 // =============================================================================

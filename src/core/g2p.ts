@@ -1635,3 +1635,604 @@ export function getG2PDifficultyCategory(
   if (difficulty.difficultyScore < 0.5) return 'moderate';
   return 'difficult';
 }
+
+// =============================================================================
+// G2P Hierarchical Model (Alphabetic → Syllable → Word)
+// =============================================================================
+
+/**
+ * G2P Hierarchical Acquisition Model
+ *
+ * Based on:
+ * - Ehri, L.C. (2005). Learning to read words: Theory, findings, and issues.
+ *   Scientific Studies of Reading, 9(2), 167-188.
+ * - Treiman, R. (1993). Beginning to Spell. Oxford University Press.
+ * - Ziegler, J.C. & Goswami, U. (2005). Reading acquisition, developmental
+ *   dyslexia, and skilled reading across languages. Psychological Bulletin.
+ *
+ * The model represents phonological knowledge in three hierarchical layers:
+ * 1. Alphabetic Layer: Individual grapheme-phoneme correspondences
+ * 2. Syllable Layer: Syllable patterns (onset-rime, syllable types)
+ * 3. Word Layer: Whole word representations and morphophonemic patterns
+ */
+
+/**
+ * Alphabetic layer unit - single grapheme-phoneme mapping
+ */
+export interface AlphabeticUnit {
+  /** The grapheme (letter or letter combination) */
+  grapheme: string;
+
+  /** Primary phoneme mapping */
+  primaryPhoneme: string;
+
+  /** Alternative phoneme mappings with contexts */
+  alternatives: Array<{
+    phoneme: string;
+    context: string;
+    frequency: number;
+  }>;
+
+  /** Acquisition stage (0-4) */
+  acquisitionStage: number;
+
+  /** Confidence in this mapping (0-1) */
+  confidence: number;
+
+  /** Number of successful recognitions */
+  exposureCount: number;
+
+  /** Error rate for this mapping */
+  errorRate: number;
+}
+
+/**
+ * Syllable layer unit - syllable-level pattern
+ */
+export interface SyllableUnit {
+  /** Syllable pattern (e.g., 'CVC', 'CVCC') */
+  pattern: string;
+
+  /** Onset (initial consonants) */
+  onset: string;
+
+  /** Rime (vowel + final consonants) */
+  rime: string;
+
+  /** Nucleus (vowel) */
+  nucleus: string;
+
+  /** Coda (final consonants) */
+  coda: string;
+
+  /** Syllable type */
+  type: SyllableType;
+
+  /** Stress level (0=unstressed, 1=primary, 2=secondary) */
+  stress: number;
+
+  /** Acquisition stage (0-4) */
+  acquisitionStage: number;
+
+  /** Example words containing this pattern */
+  examples: string[];
+}
+
+export type SyllableType =
+  | 'closed'      // CVC - cat, stop
+  | 'open'        // CV - go, me
+  | 'silent-e'    // CVCe - make, home
+  | 'vowel-team'  // CVVC - rain, feet
+  | 'r-controlled' // CVr - car, bird
+  | 'consonant-le'; // Cle - table, apple
+
+/**
+ * Word layer unit - whole word representation
+ */
+export interface WordUnit {
+  /** The word */
+  word: string;
+
+  /** Syllable breakdown */
+  syllables: SyllableUnit[];
+
+  /** Morphological structure */
+  morphemes: string[];
+
+  /** Phonological representation (IPA) */
+  phonology: string;
+
+  /** Acquisition stage (0-4) */
+  acquisitionStage: number;
+
+  /** Context-usage patterns */
+  usageContexts: string[];
+
+  /** Related word forms */
+  wordFamily: string[];
+}
+
+/**
+ * Complete hierarchical G2P profile for a learner
+ */
+export interface G2PHierarchicalProfile {
+  /** Alphabetic layer knowledge */
+  alphabetic: {
+    /** Known grapheme-phoneme mappings */
+    units: Map<string, AlphabeticUnit>;
+    /** Overall alphabetic mastery (0-1) */
+    mastery: number;
+    /** Problematic mappings */
+    difficulties: string[];
+  };
+
+  /** Syllable layer knowledge */
+  syllable: {
+    /** Known syllable patterns */
+    units: Map<string, SyllableUnit>;
+    /** Overall syllable mastery (0-1) */
+    mastery: number;
+    /** Problematic patterns */
+    difficulties: string[];
+  };
+
+  /** Word layer knowledge */
+  word: {
+    /** Known words with full representations */
+    units: Map<string, WordUnit>;
+    /** Overall word-level mastery (0-1) */
+    mastery: number;
+    /** Sight word count */
+    sightWordCount: number;
+  };
+
+  /** L1 language */
+  l1: string;
+
+  /** Target language */
+  l2: string;
+}
+
+/**
+ * Parse a word into its hierarchical components.
+ *
+ * @param word - Word to analyze
+ * @returns Hierarchical breakdown of the word
+ */
+export function parseWordHierarchy(word: string): {
+  alphabetic: AlphabeticUnit[];
+  syllables: SyllableUnit[];
+  wordUnit: WordUnit;
+} {
+  const normalized = word.toLowerCase();
+
+  // Layer 1: Alphabetic (grapheme segmentation)
+  const graphemes = segmentGraphemes(normalized);
+  const alphabeticUnits: AlphabeticUnit[] = graphemes.map(g => ({
+    grapheme: g.grapheme,
+    primaryPhoneme: g.phoneme || '',
+    alternatives: getAlternativePhonemes(g.grapheme),
+    acquisitionStage: 0,
+    confidence: g.confidence,
+    exposureCount: 0,
+    errorRate: 0,
+  }));
+
+  // Layer 2: Syllable parsing
+  const syllables = parseSyllables(normalized);
+
+  // Layer 3: Word unit
+  const wordUnit: WordUnit = {
+    word: normalized,
+    syllables,
+    morphemes: extractMorphemes(normalized),
+    phonology: graphemes.map(g => g.phoneme).filter(p => p).join(''),
+    acquisitionStage: 0,
+    usageContexts: [],
+    wordFamily: [],
+  };
+
+  return {
+    alphabetic: alphabeticUnits,
+    syllables,
+    wordUnit,
+  };
+}
+
+/**
+ * Get alternative phoneme mappings for a grapheme.
+ */
+function getAlternativePhonemes(grapheme: string): Array<{
+  phoneme: string;
+  context: string;
+  frequency: number;
+}> {
+  const alternatives: Record<string, Array<{ phoneme: string; context: string; frequency: number }>> = {
+    'a': [
+      { phoneme: '/æ/', context: 'CVC (cat)', frequency: 0.4 },
+      { phoneme: '/eɪ/', context: 'CVCe (make)', frequency: 0.3 },
+      { phoneme: '/ɑː/', context: 'before r (car)', frequency: 0.15 },
+      { phoneme: '/ə/', context: 'unstressed (about)', frequency: 0.15 },
+    ],
+    'e': [
+      { phoneme: '/ɛ/', context: 'CVC (bed)', frequency: 0.4 },
+      { phoneme: '/iː/', context: 'CVCe, ee (eve, see)', frequency: 0.3 },
+      { phoneme: '/ə/', context: 'unstressed (happen)', frequency: 0.2 },
+      { phoneme: '', context: 'silent final (make)', frequency: 0.1 },
+    ],
+    'i': [
+      { phoneme: '/ɪ/', context: 'CVC (sit)', frequency: 0.45 },
+      { phoneme: '/aɪ/', context: 'CVCe (time)', frequency: 0.35 },
+      { phoneme: '/iː/', context: 'before que (unique)', frequency: 0.1 },
+      { phoneme: '/ə/', context: 'unstressed', frequency: 0.1 },
+    ],
+    'o': [
+      { phoneme: '/ɒ/', context: 'CVC (hot)', frequency: 0.35 },
+      { phoneme: '/oʊ/', context: 'CVCe, oa (hope, boat)', frequency: 0.35 },
+      { phoneme: '/uː/', context: 'do, to, who', frequency: 0.1 },
+      { phoneme: '/ʌ/', context: 'some, come', frequency: 0.1 },
+      { phoneme: '/ə/', context: 'unstressed', frequency: 0.1 },
+    ],
+    'u': [
+      { phoneme: '/ʌ/', context: 'CVC (cup)', frequency: 0.4 },
+      { phoneme: '/juː/', context: 'CVCe (use)', frequency: 0.3 },
+      { phoneme: '/ʊ/', context: 'put, push', frequency: 0.15 },
+      { phoneme: '/uː/', context: 'rule, rude', frequency: 0.15 },
+    ],
+    'c': [
+      { phoneme: '/k/', context: 'before a, o, u', frequency: 0.7 },
+      { phoneme: '/s/', context: 'before e, i, y', frequency: 0.3 },
+    ],
+    'g': [
+      { phoneme: '/g/', context: 'before a, o, u', frequency: 0.7 },
+      { phoneme: '/dʒ/', context: 'before e, i, y', frequency: 0.3 },
+    ],
+    's': [
+      { phoneme: '/s/', context: 'initial, after voiceless', frequency: 0.6 },
+      { phoneme: '/z/', context: 'between vowels, plural', frequency: 0.35 },
+      { phoneme: '/ʃ/', context: 'before i + vowel (mansion)', frequency: 0.05 },
+    ],
+    'th': [
+      { phoneme: '/θ/', context: 'initial in content words', frequency: 0.5 },
+      { phoneme: '/ð/', context: 'function words, medial', frequency: 0.5 },
+    ],
+    'ou': [
+      { phoneme: '/aʊ/', context: 'loud, out', frequency: 0.3 },
+      { phoneme: '/uː/', context: 'soup, you', frequency: 0.2 },
+      { phoneme: '/ʌ/', context: 'tough, enough', frequency: 0.15 },
+      { phoneme: '/oʊ/', context: 'soul, shoulder', frequency: 0.15 },
+      { phoneme: '/ɔː/', context: 'thought, bought', frequency: 0.1 },
+      { phoneme: '/ə/', context: 'famous', frequency: 0.1 },
+    ],
+    'ea': [
+      { phoneme: '/iː/', context: 'eat, team', frequency: 0.5 },
+      { phoneme: '/ɛ/', context: 'bread, head', frequency: 0.3 },
+      { phoneme: '/eɪ/', context: 'great, break', frequency: 0.1 },
+      { phoneme: '/ɪə/', context: 'fear, near', frequency: 0.1 },
+    ],
+  };
+
+  return alternatives[grapheme] || [];
+}
+
+/**
+ * Parse word into syllable units.
+ */
+function parseSyllables(word: string): SyllableUnit[] {
+  const syllables: SyllableUnit[] = [];
+  const syllableCount = countSyllables(word);
+
+  // Simple syllable boundary detection
+  const vowelPositions: number[] = [];
+  for (let i = 0; i < word.length; i++) {
+    if ('aeiouy'.includes(word[i])) {
+      vowelPositions.push(i);
+    }
+  }
+
+  // Group into syllables (simplified)
+  let currentStart = 0;
+  for (let i = 0; i < syllableCount; i++) {
+    const isLast = i === syllableCount - 1;
+    const end = isLast ? word.length : findSyllableBoundary(word, vowelPositions, i);
+    const syllableStr = word.slice(currentStart, end);
+
+    const { onset, nucleus, coda } = parseOnsetRimeCoda(syllableStr);
+    const rime = nucleus + coda;
+    const pattern = getPatternString(onset, nucleus, coda);
+
+    syllables.push({
+      pattern,
+      onset,
+      rime,
+      nucleus,
+      coda,
+      type: determineSyllableType(syllableStr, coda, i === syllableCount - 1, word),
+      stress: i === 0 ? 1 : 0, // Simplified: first syllable stressed
+      acquisitionStage: 0,
+      examples: [],
+    });
+
+    currentStart = end;
+  }
+
+  return syllables;
+}
+
+/**
+ * Find syllable boundary position.
+ */
+function findSyllableBoundary(word: string, vowelPositions: number[], syllableIndex: number): number {
+  if (syllableIndex >= vowelPositions.length - 1) {
+    return word.length;
+  }
+
+  const currentVowel = vowelPositions[syllableIndex];
+  const nextVowel = vowelPositions[syllableIndex + 1];
+
+  // Count consonants between vowels
+  const consonantsBetween = nextVowel - currentVowel - 1;
+
+  if (consonantsBetween <= 1) {
+    // Single consonant goes with next syllable
+    return currentVowel + 1;
+  } else {
+    // Split consonant cluster
+    return currentVowel + Math.ceil(consonantsBetween / 2) + 1;
+  }
+}
+
+/**
+ * Parse onset, nucleus (vowel), and coda from a syllable.
+ */
+function parseOnsetRimeCoda(syllable: string): { onset: string; nucleus: string; coda: string } {
+  let onset = '';
+  let nucleus = '';
+  let coda = '';
+  let state: 'onset' | 'nucleus' | 'coda' = 'onset';
+
+  for (const char of syllable) {
+    const isVowel = 'aeiouy'.includes(char);
+
+    if (state === 'onset') {
+      if (isVowel) {
+        nucleus += char;
+        state = 'nucleus';
+      } else {
+        onset += char;
+      }
+    } else if (state === 'nucleus') {
+      if (isVowel) {
+        nucleus += char;
+      } else {
+        coda += char;
+        state = 'coda';
+      }
+    } else {
+      coda += char;
+    }
+  }
+
+  return { onset, nucleus, coda };
+}
+
+/**
+ * Get CV pattern string.
+ */
+function getPatternString(onset: string, nucleus: string, coda: string): string {
+  return (
+    'C'.repeat(onset.length) +
+    'V'.repeat(nucleus.length) +
+    'C'.repeat(coda.length)
+  );
+}
+
+/**
+ * Determine syllable type.
+ */
+function determineSyllableType(
+  syllable: string,
+  coda: string,
+  isFinal: boolean,
+  fullWord: string
+): SyllableType {
+  // R-controlled
+  if (coda === 'r' || syllable.match(/[aeiou]r$/)) {
+    return 'r-controlled';
+  }
+
+  // Silent-e pattern
+  if (isFinal && fullWord.endsWith('e') && coda === '' && syllable.length > 1) {
+    return 'silent-e';
+  }
+
+  // Consonant-le
+  if (isFinal && syllable.endsWith('le') && syllable.length > 2) {
+    return 'consonant-le';
+  }
+
+  // Vowel team
+  if (syllable.match(/[aeiou]{2}/)) {
+    return 'vowel-team';
+  }
+
+  // Open vs closed
+  if (coda === '') {
+    return 'open';
+  }
+
+  return 'closed';
+}
+
+/**
+ * Extract morphemes from a word (simplified).
+ */
+function extractMorphemes(word: string): string[] {
+  const morphemes: string[] = [];
+
+  // Common prefixes
+  const prefixes = ['un', 're', 'pre', 'dis', 'mis', 'non', 'over', 'under', 'sub', 'super'];
+  for (const prefix of prefixes) {
+    if (word.startsWith(prefix) && word.length > prefix.length + 2) {
+      morphemes.push(prefix + '-');
+      word = word.slice(prefix.length);
+      break;
+    }
+  }
+
+  // Common suffixes
+  const suffixes = ['tion', 'sion', 'ness', 'ment', 'able', 'ible', 'ful', 'less', 'ous', 'ive', 'ly', 'er', 'est', 'ing', 'ed', 's'];
+  for (const suffix of suffixes) {
+    if (word.endsWith(suffix) && word.length > suffix.length + 2) {
+      morphemes.push('-' + suffix);
+      word = word.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  // Root (whatever remains)
+  if (word.length > 0) {
+    morphemes.unshift(word);
+  }
+
+  return morphemes;
+}
+
+/**
+ * Calculate hierarchical acquisition score.
+ * Determines readiness for word-level vs syllable-level vs alphabetic-level instruction.
+ *
+ * @param profile - Learner's G2P hierarchical profile
+ * @param word - Target word to assess
+ * @returns Acquisition readiness scores at each level
+ */
+export function assessHierarchicalReadiness(
+  profile: G2PHierarchicalProfile,
+  word: string
+): {
+  alphabeticReadiness: number;
+  syllableReadiness: number;
+  wordReadiness: number;
+  recommendedLevel: 'alphabetic' | 'syllable' | 'word';
+  prerequisites: string[];
+} {
+  const hierarchy = parseWordHierarchy(word);
+
+  // Check alphabetic readiness
+  let knownGraphemes = 0;
+  const missingGraphemes: string[] = [];
+  for (const unit of hierarchy.alphabetic) {
+    const known = profile.alphabetic.units.get(unit.grapheme);
+    if (known && known.acquisitionStage >= 2) {
+      knownGraphemes++;
+    } else {
+      missingGraphemes.push(unit.grapheme);
+    }
+  }
+  const alphabeticReadiness = hierarchy.alphabetic.length > 0
+    ? knownGraphemes / hierarchy.alphabetic.length
+    : 0;
+
+  // Check syllable readiness
+  let knownSyllables = 0;
+  const missingSyllables: string[] = [];
+  for (const syllable of hierarchy.syllables) {
+    const known = profile.syllable.units.get(syllable.pattern);
+    if (known && known.acquisitionStage >= 2) {
+      knownSyllables++;
+    } else {
+      missingSyllables.push(syllable.pattern);
+    }
+  }
+  const syllableReadiness = hierarchy.syllables.length > 0
+    ? knownSyllables / hierarchy.syllables.length
+    : 0;
+
+  // Check word readiness (sight word recognition)
+  const knownWord = profile.word.units.get(word);
+  const wordReadiness = knownWord ? knownWord.acquisitionStage / 4 : 0;
+
+  // Determine recommended level
+  let recommendedLevel: 'alphabetic' | 'syllable' | 'word';
+  const prerequisites: string[] = [];
+
+  if (alphabeticReadiness < 0.7) {
+    recommendedLevel = 'alphabetic';
+    prerequisites.push(...missingGraphemes.map(g => `Learn grapheme: ${g}`));
+  } else if (syllableReadiness < 0.7) {
+    recommendedLevel = 'syllable';
+    prerequisites.push(...missingSyllables.map(s => `Practice syllable pattern: ${s}`));
+  } else {
+    recommendedLevel = 'word';
+  }
+
+  return {
+    alphabeticReadiness,
+    syllableReadiness,
+    wordReadiness,
+    recommendedLevel,
+    prerequisites,
+  };
+}
+
+/**
+ * Generate practice items for a specific hierarchical level.
+ *
+ * @param level - Target practice level
+ * @param targetPattern - Pattern to practice
+ * @param wordPool - Available words for practice
+ * @returns Filtered word list appropriate for the level
+ */
+export function generateHierarchicalPractice(
+  level: 'alphabetic' | 'syllable' | 'word',
+  targetPattern: string,
+  wordPool: string[]
+): string[] {
+  switch (level) {
+    case 'alphabetic':
+      // Find words containing the target grapheme
+      return wordPool.filter(word => {
+        const graphemes = segmentGraphemes(word);
+        return graphemes.some(g => g.grapheme === targetPattern);
+      });
+
+    case 'syllable':
+      // Find words with matching syllable patterns
+      return wordPool.filter(word => {
+        const syllables = parseSyllables(word);
+        return syllables.some(s => s.pattern === targetPattern || s.type === targetPattern as SyllableType);
+      });
+
+    case 'word':
+      // Return words that match morphological patterns
+      return wordPool.filter(word => {
+        const morphemes = extractMorphemes(word);
+        return morphemes.includes(targetPattern) || word.includes(targetPattern);
+      });
+  }
+}
+
+/**
+ * Create empty G2P hierarchical profile for a new learner.
+ */
+export function createEmptyG2PProfile(l1: string, l2: string): G2PHierarchicalProfile {
+  return {
+    alphabetic: {
+      units: new Map(),
+      mastery: 0,
+      difficulties: [],
+    },
+    syllable: {
+      units: new Map(),
+      mastery: 0,
+      difficulties: [],
+    },
+    word: {
+      units: new Map(),
+      mastery: 0,
+      sightWordCount: 0,
+    },
+    l1,
+    l2,
+  };
+}

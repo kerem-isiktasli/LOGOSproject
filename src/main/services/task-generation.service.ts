@@ -10,7 +10,16 @@ import { getPrisma } from '../db/prisma';
 import { getMasteryState } from '../db/repositories/mastery.repository';
 import { getCollocationsForWord } from '../db/repositories/collocation.repository';
 import { getWordDifficulty, type WordDifficultyResult } from './pmi.service';
+import { getClaudeService } from './claude.service';
 import type { LearningQueueItem } from './state-priority.service';
+import {
+  recommendTask,
+  extractZVector,
+  getOptimalModality,
+  type ZVector,
+  type WordProfile,
+} from '../../core/task-matching';
+import { analyzeResponseTime, getTargetResponseTime } from '../../core/response-timing';
 
 // =============================================================================
 // Types
@@ -476,10 +485,143 @@ function generateFreeResponsePrompt(spec: TaskSpec, relatedWords: string[]): str
   return prompts[Math.floor(Math.random() * prompts.length)];
 }
 
+/**
+ * Definition cache to avoid repeated API calls for the same word.
+ */
+const definitionCache = new Map<string, { definition: string; timestamp: number }>();
+const DEFINITION_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Get a definition for a word, using Claude API with caching and offline fallback.
+ *
+ * @param word - The word to define
+ * @param targetLanguage - Target language code (default: 'en')
+ * @param nativeLanguage - Native language for explanations (default: 'en')
+ * @returns Definition string
+ */
+async function getDefinition(
+  word: string,
+  targetLanguage: string = 'en',
+  nativeLanguage: string = 'en'
+): Promise<string> {
+  // Check cache first
+  const cacheKey = `${word}:${targetLanguage}:${nativeLanguage}`;
+  const cached = definitionCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.timestamp < DEFINITION_CACHE_TTL) {
+    return cached.definition;
+  }
+
+  // Try Claude API
+  try {
+    const claude = getClaudeService();
+
+    const response = await claude.generateContent({
+      type: 'explanation',
+      content: word,
+      targetLanguage,
+      nativeLanguage,
+      context: 'Provide a concise dictionary-style definition (1-2 sentences max). Focus on the most common meaning.',
+    });
+
+    // Extract just the definition from Claude's response
+    const definition = extractDefinitionFromResponse(response.content, word);
+
+    // Cache the result
+    definitionCache.set(cacheKey, {
+      definition,
+      timestamp: Date.now(),
+    });
+
+    return definition;
+  } catch {
+    // Fallback to basic definition patterns
+    return generateOfflineDefinition(word);
+  }
+}
+
+/**
+ * Extract a clean definition from Claude's response.
+ */
+function extractDefinitionFromResponse(response: string, word: string): string {
+  // Claude may include extra text, try to extract just the definition
+  const lines = response.split('\n').filter(line => line.trim());
+
+  // Look for lines that start with definition patterns
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Skip lines that are just the word itself or headers
+    if (trimmed.toLowerCase() === word.toLowerCase()) continue;
+    if (trimmed.startsWith('#') || trimmed.startsWith('*')) continue;
+    if (trimmed.includes('Definition:')) {
+      return trimmed.replace(/^Definition:\s*/i, '').trim();
+    }
+    // Return first substantive line
+    if (trimmed.length > 10 && !trimmed.endsWith(':')) {
+      return trimmed;
+    }
+  }
+
+  // If no good extraction, use first 100 chars of response
+  return response.slice(0, 100).trim() + (response.length > 100 ? '...' : '');
+}
+
+/**
+ * Generate an offline definition based on word patterns.
+ * Uses linguistic heuristics when Claude is unavailable.
+ */
+function generateOfflineDefinition(word: string): string {
+  const lowerWord = word.toLowerCase();
+
+  // Common suffix patterns for English
+  const suffixPatterns: Array<{ suffix: string; template: string }> = [
+    { suffix: 'tion', template: 'A noun referring to the act or process of' },
+    { suffix: 'sion', template: 'A noun referring to the state or result of' },
+    { suffix: 'ness', template: 'A noun describing the quality or state of being' },
+    { suffix: 'ment', template: 'A noun referring to the result or means of' },
+    { suffix: 'able', template: 'An adjective meaning capable of being' },
+    { suffix: 'ible', template: 'An adjective meaning capable of being' },
+    { suffix: 'ful', template: 'An adjective meaning full of or characterized by' },
+    { suffix: 'less', template: 'An adjective meaning without or lacking' },
+    { suffix: 'ous', template: 'An adjective meaning having the quality of' },
+    { suffix: 'ly', template: 'An adverb describing the manner of' },
+    { suffix: 'er', template: 'A noun referring to one who performs' },
+    { suffix: 'or', template: 'A noun referring to one who performs' },
+    { suffix: 'ist', template: 'A noun referring to a person who practices or believes in' },
+    { suffix: 'ize', template: 'A verb meaning to make or become' },
+    { suffix: 'ise', template: 'A verb meaning to make or become' },
+    { suffix: 'ing', template: 'A present participle or gerund form relating to' },
+    { suffix: 'ed', template: 'A past tense or adjective form relating to' },
+  ];
+
+  for (const { suffix, template } of suffixPatterns) {
+    if (lowerWord.endsWith(suffix)) {
+      const root = word.slice(0, -suffix.length);
+      if (root.length >= 3) {
+        return `${template} "${root}".`;
+      }
+    }
+  }
+
+  // Default fallback
+  return `A word or expression meaning "${word}".`;
+}
+
+/**
+ * Synchronous placeholder for contexts where async is not possible.
+ * Used in prompt generation where we can't await.
+ */
 function getDefinitionPlaceholder(word: string): string {
-  // In production, this would fetch real definitions
-  // For now, return a placeholder
-  return `[Definition of "${word}"]`;
+  // Check if we have a cached definition
+  const cacheKey = `${word}:en:en`;
+  const cached = definitionCache.get(cacheKey);
+
+  if (cached && Date.now() - cached.timestamp < DEFINITION_CACHE_TTL) {
+    return cached.definition;
+  }
+
+  // Return offline-generated definition
+  return generateOfflineDefinition(word);
 }
 
 // =============================================================================
@@ -583,4 +725,892 @@ export async function getOrGenerateTask(
   );
 
   return task;
+}
+
+// =============================================================================
+// Claude-Enhanced Task Generation
+// =============================================================================
+
+/**
+ * Generate a task using Claude AI for richer content.
+ * Falls back to template-based generation if Claude is unavailable.
+ */
+export async function generateTaskWithClaude(
+  item: LearningQueueItem,
+  config: TaskGenerationConfig = {}
+): Promise<GeneratedTask> {
+  const db = getPrisma();
+
+  // Get full object data
+  const object = await db.languageObject.findUnique({
+    where: { id: item.objectId },
+    include: {
+      masteryState: true,
+      goal: { include: { user: true } },
+    },
+  });
+
+  if (!object) {
+    throw new Error(`Object not found: ${item.objectId}`);
+  }
+
+  // Generate spec first (same as template-based)
+  const spec = await generateTaskSpec(item, config);
+  const hints = generateHints(spec.content, spec.cueLevel);
+
+  // Get collocations for context
+  const collocations = await getCollocationsForWord(spec.objectId, 3, 5);
+  const relatedWords = collocations.map((c) => c.word);
+
+  // Try Claude-enhanced generation
+  try {
+    const claude = getClaudeService();
+
+    // Only use Claude for free_response or complex tasks
+    if (spec.format === 'free_response' || spec.isFluencyTask === false) {
+      const generated = await claude.generateContent({
+        type: 'exercise',
+        content: object.content,
+        targetLanguage: object.goal.user.targetLanguage,
+        nativeLanguage: object.goal.user.nativeLanguage,
+        context: relatedWords.join(', '),
+        difficulty: spec.difficulty,
+      });
+
+      // Parse Claude response to extract prompt
+      const claudePrompt = generated.content;
+
+      return {
+        spec,
+        prompt: claudePrompt,
+        expectedAnswer: spec.content,
+        hints: spec.cueLevel > 0 ? hints : undefined,
+        relatedWords: relatedWords.length > 0 ? relatedWords : undefined,
+        metadata: {
+          generatedAt: new Date(),
+          source: 'claude',
+          estimatedTimeSeconds: spec.format === 'free_response' ? 45 : 20,
+        },
+      };
+    }
+  } catch (err) {
+    // Claude unavailable, fall back to template
+    console.warn('Claude unavailable for task generation, using template:', err);
+  }
+
+  // Fall back to template-based generation
+  return generateTask(item, config);
+}
+
+/**
+ * Get or generate task, preferring Claude for complex tasks.
+ */
+export async function getOrGenerateTaskWithClaude(
+  item: LearningQueueItem,
+  config: TaskGenerationConfig = {},
+  preferClaude: boolean = false
+): Promise<GeneratedTask> {
+  // Try cache first
+  const cached = await getCachedTask(
+    item.objectId,
+    item.type,
+    selectTaskFormat(item.stage).toString()
+  );
+
+  if (cached) {
+    return cached;
+  }
+
+  // Generate new task
+  const task = preferClaude
+    ? await generateTaskWithClaude(item, config)
+    : await generateTask(item, config);
+
+  // Cache for future use
+  await cacheTask(
+    item.objectId,
+    item.type,
+    task.spec.format,
+    task
+  );
+
+  return task;
+}
+
+// =============================================================================
+// Task-Matching Enhanced Generation
+// =============================================================================
+
+/**
+ * Extended task generation configuration with z(w) vector support.
+ */
+export interface EnhancedTaskGenerationConfig extends TaskGenerationConfig {
+  /** Use z(w) vector for task type selection */
+  useTaskMatching?: boolean;
+  /** User's focus domain for domain-relevant content */
+  focusDomain?: string;
+  /** Target response time in ms (for timed tasks) */
+  targetResponseTimeMs?: number;
+}
+
+/**
+ * Generate a task using the z(w) vector task-matching algorithm.
+ *
+ * This uses the word's characteristic vector (frequency, morphological complexity,
+ * phonological difficulty, etc.) to select the optimal task type and format.
+ *
+ * @param item - Learning queue item
+ * @param config - Enhanced task generation configuration
+ * @returns Generated task optimized for the word's characteristics
+ */
+export async function generateTaskWithMatching(
+  item: LearningQueueItem,
+  config: EnhancedTaskGenerationConfig = {}
+): Promise<GeneratedTask> {
+  const db = getPrisma();
+
+  // Get full object data
+  const object = await db.languageObject.findUnique({
+    where: { id: item.objectId },
+    include: { masteryState: true },
+  });
+
+  if (!object) {
+    throw new Error(`Object not found: ${item.objectId}`);
+  }
+
+  const mastery = object.masteryState;
+  const stage = mastery?.stage ?? 0;
+  const cueFreeAccuracy = mastery?.cueFreeAccuracy ?? 0;
+  const cueAssistedAccuracy = mastery?.cueAssistedAccuracy ?? 0;
+  const exposureCount = mastery?.exposureCount ?? 0;
+
+  // Extract z(w) vector from object properties
+  const zVector: ZVector = extractZVector(
+    {
+      frequency: object.frequency,
+      relationalDensity: object.relationalDensity,
+      domainDistribution: object.domainDistribution,
+      morphologicalScore: object.morphologicalScore,
+      phonologicalDifficulty: object.phonologicalDifficulty,
+      pragmaticScore: object.pragmaticScore,
+    },
+    config.focusDomain
+  );
+
+  // Build word profile for task matching
+  const wordProfile: WordProfile = {
+    content: object.content,
+    type: object.type,
+    zVector,
+    masteryStage: stage as 0 | 1 | 2 | 3 | 4,
+    cueFreeAccuracy,
+    exposureCount,
+  };
+
+  // Get optimal task recommendation
+  const recommendation = recommendTask(wordProfile);
+
+  // Map task-matching task type to our TaskFormat
+  // Includes syntactic complexity tasks based on Lu (2010, 2011) L2SCA framework
+  const taskTypeToFormat: Record<string, TaskFormat> = {
+    recognition: 'mcq',
+    definition_match: 'mcq',
+    recall_cued: 'fill_blank',
+    recall_free: 'fill_blank',
+    word_formation: 'fill_blank',
+    collocation: 'matching',
+    production: 'free_response',
+    register_shift: 'free_response',
+    rapid_response: 'mcq',
+    // Syntactic complexity tasks (Lu, 2010, 2011)
+    sentence_combining: 'free_response',    // Combine simple sentences → complex
+    clause_selection: 'mcq',                // Select appropriate clause type
+    error_correction: 'fill_blank',         // Fix syntactic errors
+    sentence_writing: 'free_response',      // Produce target structure
+  };
+
+  const format = taskTypeToFormat[recommendation.taskType] ?? selectTaskFormat(stage);
+
+  // Get optimal modality from z(w) vector
+  const modality = config.preferredModality ?? (getOptimalModality(zVector) as TaskModality);
+
+  // Determine cue level
+  const cueLevel = determineCueLevel(
+    cueFreeAccuracy,
+    cueAssistedAccuracy,
+    exposureCount,
+    config.maxCueLevel
+  );
+
+  // Determine fluency vs versatility
+  const isFluencyTask = recommendation.taskType === 'rapid_response' ||
+    shouldBeFluencyTask(stage, cueFreeAccuracy, config.fluencyRatio);
+
+  // Calculate difficulty with PMI enhancement
+  const baseDifficulty = object.irtDifficulty + (config.difficultyAdjustment ?? 0);
+  const { difficulty } = await calculateTaskDifficultyWithPMI(
+    object.goalId,
+    object.content,
+    baseDifficulty,
+    format,
+    cueLevel
+  );
+
+  const spec: TaskSpec = {
+    objectId: item.objectId,
+    content: object.content,
+    type: object.type,
+    format,
+    modality,
+    cueLevel,
+    difficulty,
+    isFluencyTask,
+  };
+
+  const hints = generateHints(spec.content, spec.cueLevel);
+
+  // Get collocations for context
+  const collocations = await getCollocationsForWord(spec.objectId, 3, 5);
+  const relatedWords = collocations.map((c) => c.word);
+
+  let prompt: string;
+  let expectedAnswer: string = spec.content;
+  let options: string[] | undefined;
+  let context: string | undefined;
+
+  // Generate format-specific content with task type awareness
+  switch (spec.format) {
+    case 'mcq':
+      options = await generateMCQOptions(spec.objectId, spec.content);
+      prompt = generateMCQPrompt(spec, relatedWords);
+      break;
+
+    case 'fill_blank':
+      const result = generateFillBlankPrompt(spec, relatedWords);
+      prompt = result.prompt;
+      context = result.context;
+      break;
+
+    case 'matching':
+      prompt = `Match the word with its definition or usage.`;
+      break;
+
+    case 'ordering':
+      prompt = `Arrange the words in the correct order.`;
+      break;
+
+    case 'free_response':
+      prompt = generateFreeResponsePrompt(spec, relatedWords);
+      break;
+
+    default:
+      prompt = `Practice the word: ${spec.content}`;
+  }
+
+  // Calculate target response time based on task type
+  const targetResponseTime = config.targetResponseTimeMs ??
+    getTargetResponseTime(
+      recommendation.taskType === 'rapid_response' ? 'timed' : 'recall',
+      stage
+    );
+
+  // Estimate completion time
+  const timeEstimates: Record<TaskFormat, number> = {
+    mcq: isFluencyTask ? 5 : 10,
+    fill_blank: 15,
+    matching: 20,
+    ordering: 25,
+    free_response: 45,
+  };
+
+  return {
+    spec,
+    prompt,
+    expectedAnswer,
+    options,
+    hints: spec.cueLevel > 0 ? hints : undefined,
+    context,
+    relatedWords: relatedWords.length > 0 ? relatedWords : undefined,
+    metadata: {
+      generatedAt: new Date(),
+      source: 'template',
+      estimatedTimeSeconds: timeEstimates[spec.format],
+      taskMatchingReason: recommendation.reason,
+      targetResponseTimeMs: targetResponseTime,
+      recommendedTaskType: recommendation.taskType,
+      suitabilityScore: recommendation.suitability,
+    } as GeneratedTask['metadata'] & {
+      taskMatchingReason: string;
+      targetResponseTimeMs: number;
+      recommendedTaskType: string;
+      suitabilityScore: number;
+    },
+  };
+}
+
+/**
+ * Get or generate task using task-matching when available.
+ */
+export async function getOrGenerateTaskWithMatching(
+  item: LearningQueueItem,
+  config: EnhancedTaskGenerationConfig = {}
+): Promise<GeneratedTask> {
+  // Try cache first
+  const cached = await getCachedTask(
+    item.objectId,
+    item.type,
+    selectTaskFormat(item.stage).toString()
+  );
+
+  if (cached) {
+    return cached;
+  }
+
+  // Generate new task using task-matching if enabled
+  const task = config.useTaskMatching
+    ? await generateTaskWithMatching(item, config)
+    : await generateTask(item, config);
+
+  // Cache for future use
+  await cacheTask(
+    item.objectId,
+    item.type,
+    task.spec.format,
+    task
+  );
+
+  return task;
+}
+
+// =============================================================================
+// Syntactic Complexity Task Templates (Lu, 2010, 2011)
+// =============================================================================
+
+/**
+ * Syntactic task types based on Lu's L2SCA framework.
+ *
+ * Lu, X. (2010). Automatic analysis of syntactic complexity in second
+ * language writing. International Journal of Corpus Linguistics, 15(4), 474-496.
+ *
+ * Lu, X. (2011). A corpus-based evaluation of syntactic complexity measures
+ * as indices of college-level ESL writers' language development.
+ * TESOL Quarterly, 45(1), 36-62.
+ */
+export type SyntacticTaskType =
+  | 'sentence_combining'  // Combine T-units to increase MLC
+  | 'clause_selection'    // Choose correct dependent clause (DC/C)
+  | 'nominal_complexity'  // Complex nominal insertion (CN/C)
+  | 'subordination'       // Create subordinate structures
+  | 'coordination'        // Create coordinate structures
+  | 'error_correction';   // Fix syntactic errors
+
+/**
+ * Syntactic complexity metrics (Lu L2SCA).
+ */
+export interface SyntacticMetrics {
+  /** Mean Length of Clause (MLC) - clausal elaboration */
+  mlc: number;
+  /** Complex Nominals per Clause (CN/C) - phrasal complexity */
+  cnPerC: number;
+  /** Dependent Clauses per Clause (DC/C) - subordination */
+  dcPerC: number;
+  /** Coordinate Phrases per Clause (CP/C) - coordination */
+  cpPerC: number;
+  /** Overall complexity score (normalized 0-1) */
+  complexity: number;
+}
+
+/**
+ * Generate a sentence combining task.
+ * Targets Mean Length of Clause (MLC) metric.
+ *
+ * @param simpleSentences - Array of simple sentences to combine
+ * @param targetStructure - Target grammatical structure hint
+ * @returns Task prompt and expected answer pattern
+ */
+export function generateSentenceCombiningTask(
+  simpleSentences: string[],
+  targetStructure?: string
+): { prompt: string; context: string; hint?: string } {
+  const structureHints: Record<string, string> = {
+    relative: 'Use a relative clause (who, which, that)',
+    adverbial: 'Use an adverbial clause (because, although, when)',
+    participial: 'Use a participial phrase (-ing or -ed)',
+    appositive: 'Use an appositive phrase',
+    compound: 'Use coordination (and, but, or)',
+  };
+
+  return {
+    prompt: 'Combine these sentences into one complex sentence:',
+    context: simpleSentences.map((s, i) => `${i + 1}. ${s}`).join('\n'),
+    hint: targetStructure ? structureHints[targetStructure] : undefined,
+  };
+}
+
+/**
+ * Generate a clause selection task.
+ * Targets DC/C (Dependent Clauses per Clause) metric.
+ *
+ * @param mainClause - The main/independent clause
+ * @param options - Array of clause options (one correct, others distractors)
+ * @param correctIndex - Index of correct option
+ * @returns Task prompt with multiple choice options
+ */
+export function generateClauseSelectionTask(
+  mainClause: string,
+  options: string[],
+  correctIndex: number
+): { prompt: string; context: string; options: string[]; correctAnswer: string } {
+  return {
+    prompt: 'Select the clause that best completes the sentence:',
+    context: `${mainClause} ________________`,
+    options: options,
+    correctAnswer: options[correctIndex],
+  };
+}
+
+/**
+ * Generate a complex nominal task.
+ * Targets CN/C (Complex Nominals per Clause) metric.
+ *
+ * @param baseNominal - The base noun phrase
+ * @param modifiers - Possible modifiers (adjectives, prepositional phrases, relative clauses)
+ * @returns Task prompt for noun phrase expansion
+ */
+export function generateNominalComplexityTask(
+  baseNominal: string,
+  modifiers: string[]
+): { prompt: string; context: string; options: string[] } {
+  return {
+    prompt: 'Expand this noun phrase using appropriate modifiers:',
+    context: `Base phrase: "${baseNominal}"`,
+    options: modifiers,
+  };
+}
+
+/**
+ * Generate a syntactic error correction task.
+ * Tests understanding of syntactic rules.
+ *
+ * @param incorrectSentence - Sentence with syntactic error
+ * @param errorType - Type of error (agreement, word order, missing element, etc.)
+ * @returns Task prompt with error identification and correction
+ */
+export function generateSyntacticErrorTask(
+  incorrectSentence: string,
+  errorType: 'agreement' | 'word_order' | 'missing' | 'extra' | 'tense' | 'reference'
+): { prompt: string; context: string; hint: string } {
+  const errorHints: Record<typeof errorType, string> = {
+    agreement: 'Check subject-verb or noun-modifier agreement',
+    word_order: 'Check the order of words or phrases',
+    missing: 'Something is missing from this sentence',
+    extra: 'There is an unnecessary element in this sentence',
+    tense: 'Check verb tense consistency',
+    reference: 'Check pronoun or article reference',
+  };
+
+  return {
+    prompt: 'Find and correct the error in this sentence:',
+    context: incorrectSentence,
+    hint: errorHints[errorType],
+  };
+}
+
+/**
+ * Generate a subordination task.
+ * Targets clause embedding and subordination structures.
+ *
+ * @param independentClause - The main clause
+ * @param subordinatingConjunctions - List of conjunctions to choose from
+ * @param dependentContent - Content for the dependent clause
+ * @returns Task prompt for creating subordinate structure
+ */
+export function generateSubordinationTask(
+  independentClause: string,
+  subordinatingConjunctions: string[],
+  dependentContent: string
+): { prompt: string; context: string; options: string[] } {
+  return {
+    prompt: 'Create a complex sentence by adding a subordinate clause:',
+    context: `Main idea: ${independentClause}\nRelated idea: ${dependentContent}`,
+    options: subordinatingConjunctions.map(conj =>
+      `Use "${conj}" to connect these ideas`
+    ),
+  };
+}
+
+/**
+ * Calculate CEFR-aligned syntactic complexity targets.
+ * Based on Lu (2011) proficiency correlations.
+ *
+ * @param cefrLevel - CEFR level (A1-C2)
+ * @returns Target syntactic metrics for that level
+ */
+export function getSyntacticTargetsForCEFR(
+  cefrLevel: 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2'
+): SyntacticMetrics {
+  // Based on Lu (2011) corpus data correlations with proficiency
+  const targets: Record<typeof cefrLevel, SyntacticMetrics> = {
+    A1: { mlc: 5, cnPerC: 0.3, dcPerC: 0.1, cpPerC: 0.1, complexity: 0.1 },
+    A2: { mlc: 7, cnPerC: 0.5, dcPerC: 0.2, cpPerC: 0.2, complexity: 0.25 },
+    B1: { mlc: 9, cnPerC: 0.8, dcPerC: 0.35, cpPerC: 0.3, complexity: 0.4 },
+    B2: { mlc: 11, cnPerC: 1.1, dcPerC: 0.5, cpPerC: 0.4, complexity: 0.55 },
+    C1: { mlc: 13, cnPerC: 1.4, dcPerC: 0.65, cpPerC: 0.5, complexity: 0.75 },
+    C2: { mlc: 15, cnPerC: 1.7, dcPerC: 0.8, cpPerC: 0.6, complexity: 0.9 },
+  };
+
+  return targets[cefrLevel];
+}
+
+// =============================================================================
+// Phonological Component Task Templates (G2P)
+// =============================================================================
+
+/**
+ * Phonological task types targeting G2P (Grapheme-to-Phoneme) skills.
+ *
+ * References:
+ * - Treiman, R. (1993). Beginning to Spell. Oxford University Press.
+ * - Ziegler, J. & Goswami, U. (2005). Reading acquisition, developmental
+ *   dyslexia, and skilled reading across languages. Psychological Bulletin.
+ */
+export type PhonologicalTaskType =
+  | 'minimal_pair'        // Distinguish similar sounds
+  | 'phoneme_isolation'   // Identify specific phonemes
+  | 'syllable_counting'   // Count syllables in words
+  | 'stress_marking'      // Mark word stress patterns
+  | 'rhyme_matching'      // Match rhyming words
+  | 'dictation'           // Write from audio
+  | 'pronunciation';      // Produce correct pronunciation
+
+/**
+ * Generate a minimal pair discrimination task.
+ * Tests phonemic awareness for similar sounds.
+ */
+export function generateMinimalPairTask(
+  word1: string,
+  word2: string,
+  targetPhoneme: string,
+  audioAvailable: boolean = false
+): { prompt: string; options: string[]; hint: string; modality: 'auditory' | 'visual' } {
+  return {
+    prompt: audioAvailable
+      ? 'Listen and identify which word you hear:'
+      : `Which word contains the sound /${targetPhoneme}/?`,
+    options: [word1, word2],
+    hint: `Focus on the difference in the "${targetPhoneme}" sound`,
+    modality: audioAvailable ? 'auditory' : 'visual',
+  };
+}
+
+/**
+ * Generate a syllable structure task.
+ * Tests syllable awareness and counting.
+ */
+export function generateSyllableTask(
+  word: string,
+  syllableCount: number,
+  syllableBreakdown: string[]
+): { prompt: string; context: string; expectedAnswer: number; hint: string } {
+  return {
+    prompt: 'How many syllables does this word have?',
+    context: word,
+    expectedAnswer: syllableCount,
+    hint: `Break it down: ${syllableBreakdown.join(' - ')}`,
+  };
+}
+
+/**
+ * Generate a word stress task.
+ * Tests prosodic awareness.
+ */
+export function generateStressTask(
+  word: string,
+  stressPattern: string, // e.g., "OOo" for stress on first syllable
+  stressedSyllable: number
+): { prompt: string; context: string; options: string[]; expectedAnswer: number } {
+  const syllables = word.split(/(?=[aeiou])/i).filter(s => s.length > 0);
+  const options = syllables.map((_, i) => `Syllable ${i + 1}`);
+
+  return {
+    prompt: 'Which syllable is stressed?',
+    context: `${word} (${stressPattern})`,
+    options,
+    expectedAnswer: stressedSyllable,
+  };
+}
+
+// =============================================================================
+// Morphological Component Task Templates
+// =============================================================================
+
+/**
+ * Morphological task types targeting word formation skills.
+ *
+ * References:
+ * - Bauer, L. & Nation, P. (1993). Word families. International Journal of
+ *   Lexicography, 6(4), 253-279.
+ * - Schmitt, N. & Zimmerman, C. (2002). Derivative word forms: What do
+ *   learners know? TESOL Quarterly, 36(2), 145-171.
+ */
+export type MorphologicalTaskType =
+  | 'affix_identification'  // Identify prefix/suffix
+  | 'word_family'           // Generate word family members
+  | 'derivation'            // Create derived forms
+  | 'inflection'            // Apply inflectional morphology
+  | 'root_extraction'       // Identify root/base
+  | 'compound_analysis';    // Analyze compound words
+
+/**
+ * Generate a word family task.
+ * Tests morphological productivity knowledge.
+ */
+export function generateWordFamilyTask(
+  baseWord: string,
+  familyMembers: Array<{ word: string; partOfSpeech: string }>
+): { prompt: string; context: string; expectedAnswers: string[] } {
+  return {
+    prompt: 'List other forms of this word (noun, verb, adjective, adverb):',
+    context: `Base word: "${baseWord}"`,
+    expectedAnswers: familyMembers.map(m => m.word),
+  };
+}
+
+/**
+ * Generate an affix task.
+ * Tests affix meaning and application.
+ */
+export function generateAffixTask(
+  targetAffix: string,
+  affixType: 'prefix' | 'suffix',
+  meaning: string,
+  examples: string[]
+): { prompt: string; context: string; options: string[]; hint: string } {
+  return {
+    prompt: `Which word uses the ${affixType} "${targetAffix}" correctly?`,
+    context: `The ${affixType} "${targetAffix}" means: ${meaning}`,
+    options: examples,
+    hint: `Think about what "${targetAffix}" adds to the word's meaning`,
+  };
+}
+
+/**
+ * Generate a derivation task.
+ * Tests ability to form derivatives.
+ */
+export function generateDerivationTask(
+  baseWord: string,
+  targetPartOfSpeech: 'noun' | 'verb' | 'adjective' | 'adverb',
+  expectedDerivation: string
+): { prompt: string; context: string; expectedAnswer: string; hint: string } {
+  const posHints: Record<string, string> = {
+    noun: 'person, place, thing, or concept',
+    verb: 'action or state',
+    adjective: 'describes a noun',
+    adverb: 'describes how something is done',
+  };
+
+  return {
+    prompt: `Change "${baseWord}" into a ${targetPartOfSpeech}:`,
+    context: `A ${targetPartOfSpeech} is a ${posHints[targetPartOfSpeech]}`,
+    expectedAnswer: expectedDerivation,
+    hint: `Common ${targetPartOfSpeech} endings: ${getCommonEndings(targetPartOfSpeech)}`,
+  };
+}
+
+function getCommonEndings(pos: string): string {
+  const endings: Record<string, string> = {
+    noun: '-tion, -ness, -ment, -er, -ist',
+    verb: '-ize, -ify, -en, -ate',
+    adjective: '-ful, -less, -able, -ous, -ive',
+    adverb: '-ly',
+  };
+  return endings[pos] || '';
+}
+
+// =============================================================================
+// Lexical Component Task Templates
+// =============================================================================
+
+/**
+ * Lexical task types targeting vocabulary depth and breadth.
+ *
+ * References:
+ * - Nation, I.S.P. (2001). Learning Vocabulary in Another Language. Cambridge.
+ * - Read, J. (2000). Assessing Vocabulary. Cambridge University Press.
+ */
+export type LexicalTaskType =
+  | 'definition_recall'    // Recall meaning
+  | 'synonym_selection'    // Choose synonyms
+  | 'antonym_selection'    // Choose antonyms
+  | 'collocation_fill'     // Complete collocations
+  | 'semantic_field'       // Group by meaning
+  | 'context_inference'    // Infer meaning from context
+  | 'polysemy_distinction'; // Distinguish multiple meanings
+
+/**
+ * Generate a collocation completion task.
+ * Tests collocational knowledge.
+ */
+export function generateCollocationTask(
+  collocate: string,
+  targetWord: string,
+  distractors: string[],
+  pmiScore: number
+): { prompt: string; context: string; options: string[]; correctAnswer: string; difficulty: number } {
+  const allOptions = [targetWord, ...distractors].sort(() => Math.random() - 0.5);
+
+  return {
+    prompt: 'Complete the collocation:',
+    context: `${collocate} _______`,
+    options: allOptions,
+    correctAnswer: targetWord,
+    // Higher PMI = stronger collocation = easier task
+    difficulty: 1 - Math.min(1, pmiScore / 10),
+  };
+}
+
+/**
+ * Generate a semantic field task.
+ * Tests semantic organization knowledge.
+ */
+export function generateSemanticFieldTask(
+  fieldName: string,
+  members: string[],
+  intruders: string[]
+): { prompt: string; context: string; options: string[]; correctAnswers: string[] } {
+  const allWords = [...members, ...intruders].sort(() => Math.random() - 0.5);
+
+  return {
+    prompt: `Select all words related to "${fieldName}":`,
+    context: `Semantic field: ${fieldName}`,
+    options: allWords,
+    correctAnswers: members,
+  };
+}
+
+/**
+ * Generate a polysemy task.
+ * Tests understanding of multiple word meanings.
+ */
+export function generatePolysemyTask(
+  word: string,
+  meanings: Array<{ sense: string; example: string }>,
+  targetSenseIndex: number
+): { prompt: string; context: string; options: string[]; correctAnswer: string } {
+  return {
+    prompt: `Which meaning of "${word}" is used in this context?`,
+    context: meanings[targetSenseIndex].example,
+    options: meanings.map(m => m.sense),
+    correctAnswer: meanings[targetSenseIndex].sense,
+  };
+}
+
+// =============================================================================
+// Pragmatic Component Task Templates
+// =============================================================================
+
+/**
+ * Pragmatic task types targeting contextual language use.
+ *
+ * References:
+ * - Bardovi-Harlig, K. (2001). Evaluating the empirical evidence: Grounds for
+ *   instruction in pragmatics. In K. Rose & G. Kasper (Eds.), Pragmatics in
+ *   Language Teaching. Cambridge.
+ * - Taguchi, N. (2015). Instructed pragmatics at a glance. Language Teaching, 48(1).
+ */
+export type PragmaticTaskType =
+  | 'register_selection'   // Choose appropriate register
+  | 'speech_act'           // Identify/produce speech acts
+  | 'politeness_level'     // Select politeness strategy
+  | 'context_appropriacy'  // Judge contextual appropriacy
+  | 'implicature'          // Understand implied meaning
+  | 'discourse_marker';    // Use discourse markers
+
+/**
+ * Generate a register shift task.
+ * Tests sociolinguistic competence.
+ */
+export function generateRegisterShiftTask(
+  utterance: string,
+  sourceRegister: 'formal' | 'neutral' | 'informal',
+  targetRegister: 'formal' | 'neutral' | 'informal',
+  expectedOutput: string
+): { prompt: string; context: string; sourceRegister: string; targetRegister: string; expectedAnswer: string } {
+  const registerDescriptions: Record<string, string> = {
+    formal: 'academic/professional context',
+    neutral: 'everyday conversation',
+    informal: 'casual/friendly context',
+  };
+
+  return {
+    prompt: `Rewrite this sentence for a ${targetRegister} context:`,
+    context: `"${utterance}" (currently ${sourceRegister}: ${registerDescriptions[sourceRegister]})`,
+    sourceRegister,
+    targetRegister,
+    expectedAnswer: expectedOutput,
+  };
+}
+
+/**
+ * Generate a speech act task.
+ * Tests pragmatic function recognition.
+ */
+export function generateSpeechActTask(
+  utterance: string,
+  speechAct: 'request' | 'apology' | 'complaint' | 'refusal' | 'suggestion' | 'invitation',
+  context: string
+): { prompt: string; context: string; options: string[]; correctAnswer: string } {
+  const speechActs = ['request', 'apology', 'complaint', 'refusal', 'suggestion', 'invitation'];
+
+  return {
+    prompt: 'What is the speaker doing with this utterance?',
+    context: `Context: ${context}\nUtterance: "${utterance}"`,
+    options: speechActs.map(act => `Making a ${act}`),
+    correctAnswer: `Making a ${speechAct}`,
+  };
+}
+
+/**
+ * Generate a politeness strategy task.
+ * Tests sociopragmatic competence.
+ */
+export function generatePolitenessTask(
+  situation: string,
+  options: Array<{ utterance: string; politenessLevel: number }>,
+  targetPoliteness: 'direct' | 'conventionally_indirect' | 'non_conventional'
+): { prompt: string; context: string; options: string[]; hint: string } {
+  const levelDescriptions: Record<string, string> = {
+    direct: 'clear and straightforward',
+    conventionally_indirect: 'polite but clear',
+    non_conventional: 'very indirect, hints at the request',
+  };
+
+  return {
+    prompt: `Choose the most appropriate response (${levelDescriptions[targetPoliteness]}):`,
+    context: situation,
+    options: options.map(o => o.utterance),
+    hint: `Consider the social distance and power relationship in this situation`,
+  };
+}
+
+/**
+ * Generate an implicature task.
+ * Tests ability to understand implied meanings.
+ */
+export function generateImplicatureTask(
+  dialogue: string,
+  impliedMeaning: string,
+  literalMeaning: string,
+  distractors: string[]
+): { prompt: string; context: string; options: string[]; correctAnswer: string } {
+  const allOptions = [impliedMeaning, literalMeaning, ...distractors].sort(() => Math.random() - 0.5);
+
+  return {
+    prompt: 'What does the speaker really mean?',
+    context: dialogue,
+    options: allOptions,
+    correctAnswer: impliedMeaning,
+  };
 }

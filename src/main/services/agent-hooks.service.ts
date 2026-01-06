@@ -17,7 +17,7 @@ import {
   type AgentTrigger,
   type AgentType,
   type BottleneckType,
-} from './agent-trigger';
+} from './agent-trigger.service';
 
 // ============================================================================
 // Types

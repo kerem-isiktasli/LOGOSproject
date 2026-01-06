@@ -9,9 +9,31 @@ import { registerHandler, success, error, validateUUID, validateRequired } from 
 import { prisma } from '../db/client';
 import { FSRS, createNewCard, updateMastery, responseToRating, determineStage } from '../../core/fsrs';
 import { analyzeBottleneck, ComponentType, ResponseData as BottleneckResponseData } from '../../core/bottleneck';
-import { estimateThetaMLE } from '../../core/irt';
+import { estimateThetaMLE, calibrateItems } from '../../core/irt';
 import { computePriority, computeUrgency, DEFAULT_PRIORITY_WEIGHTS } from '../../core/priority';
+import {
+  analyzeResponseTime,
+  calculateFSRSRatingWithTiming,
+  getTaskCategory,
+} from '../../core/response-timing';
 import type { ResponseData } from '../../core/fsrs';
+
+// =============================================================================
+// IRT Calibration Configuration
+// =============================================================================
+
+const IRT_CALIBRATION_CONFIG = {
+  /** Minimum responses per item for calibration */
+  minResponsesPerItem: 5,
+  /** Minimum unique items required for calibration */
+  minItems: 10,
+  /** Minimum unique respondents (sessions) required */
+  minRespondents: 3,
+  /** Maximum iterations for EM algorithm */
+  maxIterations: 50,
+  /** Whether to auto-calibrate at session end */
+  autoCalibrate: true,
+};
 
 // Singleton FSRS instance
 const fsrs = new FSRS();
@@ -115,6 +137,22 @@ export function registerSessionHandlers(): void {
         ? (session.endedAt.getTime() - session.startedAt.getTime()) / 1000 / 60
         : 0;
 
+      // Run IRT calibration if configured and sufficient data exists
+      let calibrationResult: {
+        calibrated: boolean;
+        itemsUpdated: number;
+        reason?: string;
+      } = { calibrated: false, itemsUpdated: 0 };
+
+      if (IRT_CALIBRATION_CONFIG.autoCalibrate && totalResponses >= IRT_CALIBRATION_CONFIG.minResponsesPerItem) {
+        try {
+          calibrationResult = await runIRTCalibration(session.goalId);
+        } catch (calibErr) {
+          console.warn('IRT calibration skipped:', calibErr);
+          calibrationResult.reason = calibErr instanceof Error ? calibErr.message : 'Unknown calibration error';
+        }
+      }
+
       return success({
         id: session.id,
         endedAt: session.endedAt,
@@ -124,6 +162,7 @@ export function registerSessionHandlers(): void {
           accuracy,
           durationMinutes: Math.round(duration * 10) / 10,
         },
+        calibration: calibrationResult,
       });
     } catch (err) {
       console.error('Failed to end session:', err);
@@ -200,7 +239,41 @@ export function registerSessionHandlers(): void {
     }
 
     try {
-      // Create response record
+      // Get the language object for word length and mastery info
+      const languageObject = await prisma.languageObject.findUnique({
+        where: { id: objectId },
+        select: { content: true, type: true },
+      });
+
+      const wordLength = languageObject?.content.length ?? 6;
+
+      // Get mastery state early for response timing analysis
+      let mastery = await prisma.masteryState.findUnique({
+        where: { objectId },
+      });
+
+      const currentStage = mastery?.stage ?? 0;
+
+      // Analyze response timing for quality assessment
+      const taskCategory = getTaskCategory(taskFormat as 'mcq' | 'fill_blank' | 'free_response', taskType);
+      const timingAnalysis = analyzeResponseTime(
+        responseTimeMs,
+        taskCategory,
+        currentStage,
+        wordLength,
+        correct
+      );
+
+      // Calculate timing-aware FSRS rating
+      const timingAwareRating = calculateFSRSRatingWithTiming(
+        correct,
+        responseTimeMs,
+        taskFormat as 'mcq' | 'fill_blank' | 'free_response',
+        currentStage,
+        wordLength
+      );
+
+      // Create response record with timing metadata
       const response = await prisma.response.create({
         data: {
           sessionId,
@@ -214,11 +287,6 @@ export function registerSessionHandlers(): void {
           responseContent,
           expectedContent,
         },
-      });
-
-      // Get or create mastery state
-      let mastery = await prisma.masteryState.findUnique({
-        where: { objectId },
       });
 
       const responseData: ResponseData = {
@@ -237,8 +305,8 @@ export function registerSessionHandlers(): void {
       if (!mastery) {
         // Create new mastery state
         const newCard = createNewCard();
-        const rating = responseToRating(responseData);
-        const updatedCard = fsrs.schedule(newCard, rating, now);
+        // Use timing-aware rating for more accurate scheduling
+        const updatedCard = fsrs.schedule(newCard, timingAwareRating, now);
 
         newStage = responseData.correct ? 1 : 0;
         stageChanged = newStage !== oldStage;
@@ -269,8 +337,8 @@ export function registerSessionHandlers(): void {
           state: mastery.fsrsReps === 0 ? 'new' as const : 'review' as const,
         };
 
-        const rating = responseToRating(responseData);
-        const updatedCard = fsrs.schedule(existingCard, rating, now);
+        // Use timing-aware rating for better scheduling (accounts for response speed)
+        const updatedCard = fsrs.schedule(existingCard, timingAwareRating, now);
 
         // Calculate updated accuracy with recency weighting
         const weight = 1 / (mastery.exposureCount * 0.3 + 1);
@@ -332,10 +400,51 @@ export function registerSessionHandlers(): void {
         }));
         const responseArray = recentResponses.map((r: { correct: boolean }) => r.correct);
 
+        // Global theta estimate
         const estimate = estimateThetaMLE(responseArray, items);
 
+        // Component-specific theta updates (P1: per-component theta estimation)
+        type ComponentKey = 'PHON' | 'MORPH' | 'LEX' | 'SYNT' | 'PRAG';
+        const componentMapping: Record<ComponentKey, keyof typeof componentThetas> = {
+          PHON: 'thetaPhonology',
+          MORPH: 'thetaMorphology',
+          LEX: 'thetaLexical',
+          SYNT: 'thetaSyntactic',
+          PRAG: 'thetaPragmatic',
+        };
+
+        // Group responses by component type
+        const responsesByComponent = new Map<ComponentKey, { items: typeof items; responses: boolean[] }>();
+        for (let i = 0; i < recentResponses.length; i++) {
+          const r = recentResponses[i];
+          const componentType = (r.object.type || 'LEX').toUpperCase() as ComponentKey;
+          const validComponent = componentMapping[componentType] ? componentType : 'LEX';
+
+          if (!responsesByComponent.has(validComponent)) {
+            responsesByComponent.set(validComponent, { items: [], responses: [] });
+          }
+          const componentData = responsesByComponent.get(validComponent)!;
+          componentData.items.push(items[i]);
+          componentData.responses.push(responseArray[i]);
+        }
+
+        // Calculate component-specific theta values
+        const componentThetas: Record<string, number> = {};
+        for (const [component, data] of responsesByComponent) {
+          if (data.items.length >= 5) { // Minimum 5 responses for component estimation
+            const componentEstimate = estimateThetaMLE(data.responses, data.items);
+            const fieldName = componentMapping[component];
+            if (fieldName) {
+              componentThetas[fieldName] = componentEstimate.theta;
+            }
+          }
+        }
+
         await prisma.user.updateMany({
-          data: { thetaGlobal: estimate.theta },
+          data: {
+            thetaGlobal: estimate.theta,
+            ...componentThetas,
+          },
         });
       }
 
@@ -439,7 +548,13 @@ export function registerSessionHandlers(): void {
         stageChanged,
         oldStage,
         newStage,
-        fsrsRating: responseToRating(responseData),
+        fsrsRating: timingAwareRating,
+        timing: {
+          classification: timingAnalysis.classification,
+          normalizedTime: timingAnalysis.normalizedTime,
+          isAutomatic: timingAnalysis.isAutomatic,
+          possibleGuessing: timingAnalysis.possibleGuessing,
+        },
       });
     } catch (err) {
       console.error('Failed to record response:', err);
@@ -772,6 +887,169 @@ export function registerSessionHandlers(): void {
       return error('Failed to get session stats');
     }
   });
+}
+
+// =============================================================================
+// IRT Calibration Helper
+// =============================================================================
+
+/**
+ * Run IRT item parameter calibration based on accumulated response data.
+ *
+ * Uses the EM algorithm (Joint Maximum Likelihood via calibrateItems) to
+ * estimate item difficulty (b) and discrimination (a) parameters from
+ * the response matrix.
+ *
+ * Academic reference: Baker & Kim (2004) "Item Response Theory: Parameter
+ * Estimation Techniques"
+ *
+ * @param goalId - The learning goal to calibrate items for
+ * @returns Calibration result with number of items updated
+ */
+async function runIRTCalibration(goalId: string): Promise<{
+  calibrated: boolean;
+  itemsUpdated: number;
+  reason?: string;
+}> {
+  // Get all responses for this goal, grouped by item
+  const responses = await prisma.response.findMany({
+    where: {
+      session: { goalId },
+    },
+    select: {
+      objectId: true,
+      correct: true,
+      sessionId: true,
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  if (responses.length < IRT_CALIBRATION_CONFIG.minResponsesPerItem * IRT_CALIBRATION_CONFIG.minItems) {
+    return {
+      calibrated: false,
+      itemsUpdated: 0,
+      reason: 'Insufficient total responses for calibration',
+    };
+  }
+
+  // Build response matrix: rows = sessions (as proxy for persons), cols = items
+  const sessionIds = [...new Set(responses.map(r => r.sessionId))];
+  const objectIds = [...new Set(responses.map(r => r.objectId))];
+
+  if (sessionIds.length < IRT_CALIBRATION_CONFIG.minRespondents) {
+    return {
+      calibrated: false,
+      itemsUpdated: 0,
+      reason: `Need at least ${IRT_CALIBRATION_CONFIG.minRespondents} sessions for calibration`,
+    };
+  }
+
+  if (objectIds.length < IRT_CALIBRATION_CONFIG.minItems) {
+    return {
+      calibrated: false,
+      itemsUpdated: 0,
+      reason: `Need at least ${IRT_CALIBRATION_CONFIG.minItems} items for calibration`,
+    };
+  }
+
+  // Count responses per item to filter out items with insufficient data
+  const responsesPerItem = new Map<string, number>();
+  for (const r of responses) {
+    responsesPerItem.set(r.objectId, (responsesPerItem.get(r.objectId) ?? 0) + 1);
+  }
+
+  // Filter items with minimum responses
+  const calibratableItems = objectIds.filter(
+    id => (responsesPerItem.get(id) ?? 0) >= IRT_CALIBRATION_CONFIG.minResponsesPerItem
+  );
+
+  if (calibratableItems.length < IRT_CALIBRATION_CONFIG.minItems) {
+    return {
+      calibrated: false,
+      itemsUpdated: 0,
+      reason: `Only ${calibratableItems.length} items have sufficient responses`,
+    };
+  }
+
+  // Create item index map
+  const itemIndex = new Map<string, number>();
+  calibratableItems.forEach((id, idx) => itemIndex.set(id, idx));
+
+  // Build response matrix
+  // For sessions with multiple responses to same item, use last response
+  const responseMap = new Map<string, Map<string, boolean>>();
+  for (const r of responses) {
+    if (!itemIndex.has(r.objectId)) continue;
+
+    if (!responseMap.has(r.sessionId)) {
+      responseMap.set(r.sessionId, new Map());
+    }
+    responseMap.get(r.sessionId)!.set(r.objectId, r.correct);
+  }
+
+  // Convert to matrix format (sessions x items)
+  // Fill missing values with null (will need to handle)
+  const responseMatrix: boolean[][] = [];
+
+  for (const sessionId of sessionIds) {
+    const sessionResponses = responseMap.get(sessionId);
+    if (!sessionResponses) continue;
+
+    // Only include sessions that have responses to at least half the items
+    const responseCount = calibratableItems.filter(id => sessionResponses.has(id)).length;
+    if (responseCount < calibratableItems.length * 0.3) continue;
+
+    const row: boolean[] = calibratableItems.map(itemId =>
+      sessionResponses.get(itemId) ?? false // Missing treated as incorrect
+    );
+    responseMatrix.push(row);
+  }
+
+  if (responseMatrix.length < IRT_CALIBRATION_CONFIG.minRespondents) {
+    return {
+      calibrated: false,
+      itemsUpdated: 0,
+      reason: 'Not enough complete response patterns for calibration',
+    };
+  }
+
+  // Run calibration
+  const calibrated = calibrateItems(responseMatrix, IRT_CALIBRATION_CONFIG.maxIterations);
+
+  // Update item parameters in database
+  let itemsUpdated = 0;
+
+  for (let i = 0; i < calibratableItems.length; i++) {
+    const itemId = calibratableItems[i];
+    const params = calibrated[i];
+
+    if (!params || !isFinite(params.a) || !isFinite(params.b)) {
+      continue;
+    }
+
+    // Only update if standard errors are reasonable (not Infinity)
+    if (params.se_a > 1.0 || params.se_b > 1.0) {
+      continue;
+    }
+
+    try {
+      await prisma.languageObject.update({
+        where: { id: itemId },
+        data: {
+          irtDifficulty: params.b,
+          irtDiscrimination: params.a,
+        },
+      });
+      itemsUpdated++;
+    } catch {
+      // Item may have been deleted, skip
+    }
+  }
+
+  return {
+    calibrated: itemsUpdated > 0,
+    itemsUpdated,
+  };
 }
 
 export function unregisterSessionHandlers(): void {

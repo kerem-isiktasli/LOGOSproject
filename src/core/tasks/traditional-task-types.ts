@@ -10,6 +10,7 @@
 
 import type { ComponentType, TaskModality, MasteryStage } from '../types';
 import type { PedagogicalIntent, LearningPhase } from '../content/pedagogical-intent';
+import type { FeatureVector } from '../state/component-object-state';
 
 // =============================================================================
 // Types
@@ -922,4 +923,195 @@ export function selectOptimalTaskType(
   });
 
   return scored[0]?.type || 'cloze_deletion'; // Default fallback
+}
+
+// =============================================================================
+// z(w) Vector Task Selection (Gap 2.2)
+// =============================================================================
+
+/**
+ * Task type recommendations based on z(w) feature vector.
+ * From DEVELOPMENT-PROTOCOL.md:
+ * - High M → Word family tasks
+ * - High P → Dictation/G2P tasks
+ * - High R → Collocation tasks
+ * - Domain D → Context judgment tasks
+ */
+interface ZVectorTaskRecommendation {
+  /** Primary recommended task types */
+  primaryTasks: TraditionalTaskType[];
+  /** Secondary task types */
+  secondaryTasks: TraditionalTaskType[];
+  /** Feature that drove the recommendation */
+  driver: 'M' | 'P' | 'R' | 'D' | 'F' | 'balanced';
+  /** Confidence in recommendation (0-1) */
+  confidence: number;
+}
+
+/** Threshold for "high" feature values */
+const HIGH_THRESHOLD = 0.7;
+/** Threshold for "moderate" feature values */
+const MODERATE_THRESHOLD = 0.4;
+
+/**
+ * Get task recommendations based on z(w) feature vector.
+ * Implements Gap 2.2: z(w) vector matching.
+ */
+export function getTasksForFeatureVector(
+  featureVector: FeatureVector,
+  masteryStage: MasteryStage = 2
+): ZVectorTaskRecommendation {
+  const { F, R, D, M, P } = featureVector;
+
+  // Determine dominant feature
+  const features = [
+    { key: 'M' as const, value: M },
+    { key: 'P' as const, value: P },
+    { key: 'R' as const, value: R },
+    { key: 'F' as const, value: F },
+  ];
+
+  // Check domain distribution for specialized domains
+  const domainKeys = Object.keys(D);
+  const maxDomainValue = domainKeys.length > 0
+    ? Math.max(...Object.values(D))
+    : 0;
+  const hasDominantDomain = maxDomainValue > HIGH_THRESHOLD;
+
+  // Sort by value to find dominant feature
+  const sorted = features.sort((a, b) => b.value - a.value);
+  const dominant = sorted[0];
+
+  // Task recommendations by feature
+  const tasksByFeature: Record<'M' | 'P' | 'R' | 'D' | 'F' | 'balanced', TraditionalTaskType[]> = {
+    // High M: Morphological tasks
+    M: ['word_formation_analysis', 'sentence_completion', 'cloze_deletion'],
+    // High P: Phonological tasks (dictation, listening)
+    P: ['dictation', 'listening_comprehension', 'error_correction'],
+    // High R: Relational tasks (collocations)
+    R: ['collocation_judgment', 'sentence_combining', 'word_bank_fill'],
+    // High D: Domain-specific context tasks
+    D: ['register_appropriateness', 'inference_from_context', 'register_shift'],
+    // High F: Fluency/automatization tasks
+    F: ['free_response', 'summary_writing', 'dialogue_completion'],
+    // Balanced: General tasks
+    balanced: ['cloze_deletion', 'multiple_blank', 'question_answering'],
+  };
+
+  // Secondary tasks (always useful)
+  const secondaryByStage: Record<number, TraditionalTaskType[]> = {
+    0: ['detail_extraction', 'word_bank_fill'],
+    1: ['multiple_blank', 'cloze_deletion'],
+    2: ['sentence_completion', 'error_correction'],
+    3: ['paraphrasing', 'translation'],
+    4: ['essay_writing', 'debate_response'],
+  };
+
+  // Determine driver and confidence
+  let driver: 'M' | 'P' | 'R' | 'D' | 'F' | 'balanced';
+  let confidence: number;
+
+  if (hasDominantDomain) {
+    // Domain is dominant
+    driver = 'D';
+    confidence = maxDomainValue;
+  } else if (dominant.value >= HIGH_THRESHOLD) {
+    // Clear dominant feature
+    driver = dominant.key;
+    confidence = dominant.value;
+  } else if (dominant.value >= MODERATE_THRESHOLD) {
+    // Moderate dominant feature
+    driver = dominant.key;
+    confidence = dominant.value * 0.7; // Reduced confidence
+  } else {
+    // No clear dominant - balanced approach
+    driver = 'balanced';
+    confidence = 0.5;
+  }
+
+  // Filter tasks by mastery stage
+  const stageFilter = (type: TraditionalTaskType): boolean => {
+    const meta = TRADITIONAL_TASK_TYPES[type];
+    return masteryStage >= meta.masteryRange[0] && masteryStage <= meta.masteryRange[1];
+  };
+
+  const primaryTasks = tasksByFeature[driver].filter(stageFilter);
+  const secondaryTasks = (secondaryByStage[masteryStage] || secondaryByStage[2])
+    .filter(stageFilter)
+    .filter((t) => !primaryTasks.includes(t));
+
+  return {
+    primaryTasks: primaryTasks.length > 0 ? primaryTasks : tasksByFeature.balanced.filter(stageFilter),
+    secondaryTasks,
+    driver,
+    confidence,
+  };
+}
+
+/**
+ * Select optimal task type using both traditional suitability scoring
+ * AND z(w) feature vector matching.
+ */
+export function selectOptimalTaskTypeWithFeatureVector(
+  masteryStage: MasteryStage,
+  targetComponent: ComponentType,
+  intent: PedagogicalIntent,
+  featureVector: FeatureVector,
+  recentTasks: TraditionalTaskType[] = []
+): { taskType: TraditionalTaskType; source: 'feature' | 'suitability' | 'hybrid' } {
+  // Get z(w) recommendations
+  const featureRecommendation = getTasksForFeatureVector(featureVector, masteryStage);
+
+  // Get traditional suitability candidates
+  const suitabilityCandidates = getTaskTypesForStage(masteryStage);
+
+  // If feature vector has high confidence, prioritize its recommendations
+  if (featureRecommendation.confidence >= 0.7) {
+    // Try primary tasks first
+    for (const task of featureRecommendation.primaryTasks) {
+      if (!recentTasks.includes(task)) {
+        return { taskType: task, source: 'feature' };
+      }
+    }
+    // Fall back to secondary tasks
+    for (const task of featureRecommendation.secondaryTasks) {
+      if (!recentTasks.includes(task)) {
+        return { taskType: task, source: 'feature' };
+      }
+    }
+  }
+
+  // Hybrid approach: boost feature-recommended tasks in suitability scoring
+  const scored = suitabilityCandidates.map((type) => {
+    let score = calculateTaskSuitability(type, masteryStage, targetComponent, intent);
+
+    // Boost if in feature recommendations
+    if (featureRecommendation.primaryTasks.includes(type)) {
+      score += 20 * featureRecommendation.confidence;
+    } else if (featureRecommendation.secondaryTasks.includes(type)) {
+      score += 10 * featureRecommendation.confidence;
+    }
+
+    return {
+      type,
+      score,
+      recent: recentTasks.includes(type),
+    };
+  });
+
+  // Sort by score, deprioritize recent
+  scored.sort((a, b) => {
+    if (a.recent !== b.recent) return a.recent ? 1 : -1;
+    return b.score - a.score;
+  });
+
+  const selectedType = scored[0]?.type || 'cloze_deletion';
+  const isFromFeature =
+    featureRecommendation.primaryTasks.includes(selectedType) ||
+    featureRecommendation.secondaryTasks.includes(selectedType);
+
+  return {
+    taskType: selectedType,
+    source: isFromFeature && featureRecommendation.confidence >= 0.5 ? 'hybrid' : 'suitability',
+  };
 }

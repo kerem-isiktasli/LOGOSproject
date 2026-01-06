@@ -248,6 +248,108 @@ const logosAPI: LogosAPI = {
   },
 
   // ============================================================================
+  // Corpus Sources
+  // Handler channels: goal:list-sources, goal:get-recommended-sources,
+  // goal:populate-vocabulary, goal:get-population-status, goal:clear-vocabulary, goal:upload-corpus
+  // ============================================================================
+
+  corpus: {
+    // goal:list-sources - get all available corpus sources
+    listSources: () => invoke('goal:list-sources', {}),
+
+    // goal:get-recommended-sources - get recommended sources for a goal
+    getRecommendedSources: (goalId: string, nlDescription?: string) =>
+      invoke('goal:get-recommended-sources', { goalId, nlDescription }),
+
+    // goal:populate-vocabulary - populate vocabulary from corpus sources
+    populateVocabulary: (
+      goalId: string,
+      options?: {
+        nlDescription?: string;
+        selectedSourceIds?: string[];
+        maxSources?: number;
+        targetVocabSize?: number;
+      }
+    ) => invoke('goal:populate-vocabulary', { goalId, ...options }),
+
+    // goal:get-population-status - get vocabulary population status
+    getPopulationStatus: (goalId: string) =>
+      invoke('goal:get-population-status', { goalId }),
+
+    // goal:clear-vocabulary - clear vocabulary for repopulation
+    clearVocabulary: (goalId: string) =>
+      invoke('goal:clear-vocabulary', { goalId }),
+
+    // goal:upload-corpus - upload documents for vocabulary extraction
+    uploadDocuments: (
+      goalId: string,
+      documents: Array<{ filename: string; content: string; mimeType: string }>
+    ) => invoke('goal:upload-corpus', { goalId, documents }),
+  },
+
+  // ============================================================================
+  // Sync & Offline Queue
+  // Handler channels: sync:status, sync:force, offline:queue-size,
+  // sync:queue-stats, sync:clear-completed, sync:retry-failed,
+  // sync:set-online, sync:check-connectivity
+  // ============================================================================
+
+  sync: {
+    // sync:status - get current sync/connectivity status
+    getStatus: () => invoke('sync:status', {}),
+
+    // sync:force - force sync of all pending queue items
+    forceSync: () => invoke('sync:force', {}),
+
+    // offline:queue-size - get number of pending queue items
+    getQueueSize: () => invoke('offline:queue-size', {}),
+
+    // sync:queue-stats - get detailed queue statistics
+    getQueueStats: () => invoke('sync:queue-stats', {}),
+
+    // sync:clear-completed - clear completed queue items
+    clearCompleted: (olderThanHours?: number) =>
+      invoke('sync:clear-completed', { olderThanHours }),
+
+    // sync:retry-failed - retry failed queue items
+    retryFailed: () => invoke('sync:retry-failed', {}),
+
+    // sync:set-online - manually set online/offline status
+    setOnline: (online: boolean) => invoke('sync:set-online', { online }),
+
+    // sync:check-connectivity - check Claude API connectivity
+    checkConnectivity: () => invoke('sync:check-connectivity', {}),
+  },
+
+  // ============================================================================
+  // Onboarding
+  // Handler channels: onboarding:check-status, onboarding:complete, onboarding:skip
+  // ============================================================================
+
+  onboarding: {
+    // onboarding:check-status - check if user needs onboarding
+    checkStatus: () => invoke('onboarding:check-status', {}),
+
+    // onboarding:complete - complete onboarding with user data
+    complete: (data: {
+      nativeLanguage: string;
+      targetLanguage: string;
+      domain: string;
+      modality: string[];
+      purpose: string;
+      benchmark?: string;
+      deadline?: string;
+      dailyTime: number;
+    }) => invoke('onboarding:complete', data),
+
+    // onboarding:skip - skip onboarding (create minimal user)
+    skip: () => invoke('onboarding:skip', {}),
+
+    // onboarding:get-user - get current user for resume/edit
+    getUser: () => invoke('onboarding:get-user', {}),
+  },
+
+  // ============================================================================
   // App Info
   // ============================================================================
 

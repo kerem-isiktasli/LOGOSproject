@@ -477,14 +477,143 @@ export class DistractorGenerator {
 
   /**
    * Generate false friend distractors.
+   * Uses a database of cognates that have different meanings in different languages.
    */
   private generateFalseFriend(
     target: LanguageObject,
     config: DistractorConfig
   ): Distractor[] {
-    // Would need a false friends database
-    // Placeholder for now
-    return [];
+    const results: Distractor[] = [];
+
+    if (!config.nativeLanguage) return results;
+
+    // Get false friends database for the L1
+    const falseFriends = this.getFalseFriendsForLanguage(config.nativeLanguage);
+    if (!falseFriends) return results;
+
+    const targetWord = target.content.toLowerCase();
+
+    // Check if target has false friend cognates
+    for (const [english, entries] of falseFriends) {
+      // Check if target word is related to any false friend entry
+      if (english === targetWord || this.levenshteinDistance(english, targetWord) <= 2) {
+        for (const entry of entries) {
+          results.push({
+            content: entry.falseCognate,
+            strategy: 'translation_false_friend',
+            plausibility: 0.9, // False friends are highly plausible distractors
+            explanation: `"${entry.falseCognate}" looks like "${english}" but actually means "${entry.actualMeaning}" in ${config.nativeLanguage}`,
+          });
+        }
+      }
+    }
+
+    return results.slice(0, 3);
+  }
+
+  /**
+   * Get false friends database for a specific L1.
+   */
+  private getFalseFriendsForLanguage(
+    language: string
+  ): Map<string, Array<{ falseCognate: string; actualMeaning: string }>> | null {
+    const databases: Record<string, Map<string, Array<{ falseCognate: string; actualMeaning: string }>>> = {
+      Spanish: new Map([
+        ['actual', [{ falseCognate: 'actualmente', actualMeaning: 'currently' }]],
+        ['assist', [{ falseCognate: 'asistir', actualMeaning: 'to attend' }]],
+        ['carpet', [{ falseCognate: 'carpeta', actualMeaning: 'folder' }]],
+        ['constipated', [{ falseCognate: 'constipado', actualMeaning: 'having a cold' }]],
+        ['embarrassed', [{ falseCognate: 'embarazada', actualMeaning: 'pregnant' }]],
+        ['exit', [{ falseCognate: 'éxito', actualMeaning: 'success' }]],
+        ['fabric', [{ falseCognate: 'fábrica', actualMeaning: 'factory' }]],
+        ['introduce', [{ falseCognate: 'introducir', actualMeaning: 'to insert' }]],
+        ['library', [{ falseCognate: 'librería', actualMeaning: 'bookstore' }]],
+        ['realize', [{ falseCognate: 'realizar', actualMeaning: 'to carry out' }]],
+        ['record', [{ falseCognate: 'recordar', actualMeaning: 'to remember' }]],
+        ['remove', [{ falseCognate: 'remover', actualMeaning: 'to stir' }]],
+        ['sensible', [{ falseCognate: 'sensible', actualMeaning: 'sensitive' }]],
+        ['soap', [{ falseCognate: 'sopa', actualMeaning: 'soup' }]],
+        ['success', [{ falseCognate: 'suceso', actualMeaning: 'event' }]],
+      ]),
+
+      Portuguese: new Map([
+        ['actually', [{ falseCognate: 'atualmente', actualMeaning: 'currently' }]],
+        ['attend', [{ falseCognate: 'atender', actualMeaning: 'to answer/serve' }]],
+        ['balcony', [{ falseCognate: 'balcão', actualMeaning: 'counter' }]],
+        ['beef', [{ falseCognate: 'bife', actualMeaning: 'steak' }]],
+        ['college', [{ falseCognate: 'colégio', actualMeaning: 'school' }]],
+        ['comprehensive', [{ falseCognate: 'compreensivo', actualMeaning: 'understanding' }]],
+        ['costume', [{ falseCognate: 'costume', actualMeaning: 'habit/custom' }]],
+        ['eventually', [{ falseCognate: 'eventualmente', actualMeaning: 'occasionally' }]],
+        ['exquisite', [{ falseCognate: 'esquisito', actualMeaning: 'weird' }]],
+        ['intend', [{ falseCognate: 'entender', actualMeaning: 'to understand' }]],
+        ['legend', [{ falseCognate: 'legenda', actualMeaning: 'subtitle/caption' }]],
+        ['pretend', [{ falseCognate: 'pretender', actualMeaning: 'to intend' }]],
+        ['push', [{ falseCognate: 'puxar', actualMeaning: 'to pull' }]],
+        ['resume', [{ falseCognate: 'resumir', actualMeaning: 'to summarize' }]],
+      ]),
+
+      French: new Map([
+        ['actually', [{ falseCognate: 'actuellement', actualMeaning: 'currently' }]],
+        ['assist', [{ falseCognate: 'assister', actualMeaning: 'to attend' }]],
+        ['attend', [{ falseCognate: 'attendre', actualMeaning: 'to wait' }]],
+        ['bless', [{ falseCognate: 'blesser', actualMeaning: 'to wound' }]],
+        ['chair', [{ falseCognate: 'chair', actualMeaning: 'flesh/meat' }]],
+        ['coin', [{ falseCognate: 'coin', actualMeaning: 'corner/wedge' }]],
+        ['demand', [{ falseCognate: 'demander', actualMeaning: 'to ask' }]],
+        ['entrée', [{ falseCognate: 'entrée', actualMeaning: 'starter/appetizer' }]],
+        ['eventual', [{ falseCognate: 'éventuel', actualMeaning: 'possible' }]],
+        ['library', [{ falseCognate: 'librairie', actualMeaning: 'bookstore' }]],
+        ['location', [{ falseCognate: 'location', actualMeaning: 'rental' }]],
+        ['magazine', [{ falseCognate: 'magasin', actualMeaning: 'store' }]],
+        ['pass', [{ falseCognate: 'passer', actualMeaning: 'to spend (time)' }]],
+        ['prune', [{ falseCognate: 'prune', actualMeaning: 'plum' }]],
+        ['raisin', [{ falseCognate: 'raisin', actualMeaning: 'grape' }]],
+      ]),
+
+      German: new Map([
+        ['become', [{ falseCognate: 'bekommen', actualMeaning: 'to get/receive' }]],
+        ['brave', [{ falseCognate: 'brav', actualMeaning: 'well-behaved' }]],
+        ['chef', [{ falseCognate: 'Chef', actualMeaning: 'boss' }]],
+        ['gift', [{ falseCognate: 'Gift', actualMeaning: 'poison' }]],
+        ['gymnasium', [{ falseCognate: 'Gymnasium', actualMeaning: 'high school' }]],
+        ['hell', [{ falseCognate: 'hell', actualMeaning: 'bright/light' }]],
+        ['kind', [{ falseCognate: 'Kind', actualMeaning: 'child' }]],
+        ['mile', [{ falseCognate: 'Meile', actualMeaning: 'nautical mile (different length)' }]],
+        ['rat', [{ falseCognate: 'Rat', actualMeaning: 'advice/council' }]],
+        ['rock', [{ falseCognate: 'Rock', actualMeaning: 'skirt' }]],
+        ['see', [{ falseCognate: 'See', actualMeaning: 'lake' }]],
+        ['wink', [{ falseCognate: 'Winkel', actualMeaning: 'angle/corner' }]],
+      ]),
+
+      Italian: new Map([
+        ['accident', [{ falseCognate: 'accidente', actualMeaning: 'damn! (exclamation)' }]],
+        ['camera', [{ falseCognate: 'camera', actualMeaning: 'room' }]],
+        ['cold', [{ falseCognate: 'caldo', actualMeaning: 'hot/warm' }]],
+        ['factory', [{ falseCognate: 'fattoria', actualMeaning: 'farm' }]],
+        ['firm', [{ falseCognate: 'firma', actualMeaning: 'signature' }]],
+        ['magazine', [{ falseCognate: 'magazzino', actualMeaning: 'warehouse' }]],
+        ['parent', [{ falseCognate: 'parente', actualMeaning: 'relative' }]],
+        ['sensible', [{ falseCognate: 'sensibile', actualMeaning: 'sensitive' }]],
+        ['stamp', [{ falseCognate: 'stampa', actualMeaning: 'printing/press' }]],
+      ]),
+
+      Japanese: new Map([
+        ['mansion', [{ falseCognate: 'マンション (manshon)', actualMeaning: 'apartment' }]],
+        ['smart', [{ falseCognate: 'スマート (sumaato)', actualMeaning: 'slim/stylish' }]],
+        ['claim', [{ falseCognate: 'クレーム (kurēmu)', actualMeaning: 'complaint' }]],
+        ['naive', [{ falseCognate: 'ナイーブ (naiibu)', actualMeaning: 'sensitive' }]],
+        ['consent', [{ falseCognate: 'コンセント (konsento)', actualMeaning: 'electrical outlet' }]],
+        ['cunning', [{ falseCognate: 'カンニング (kanningu)', actualMeaning: 'cheating on exam' }]],
+      ]),
+
+      Mandarin: new Map([
+        ['actually', [{ falseCognate: '其实 (qíshí)', actualMeaning: 'in fact/really' }]],
+        ['embarrassed', [{ falseCognate: '尴尬 (gāngà)', actualMeaning: 'awkward situation' }]],
+      ]),
+    };
+
+    return databases[language] || null;
   }
 
   /**

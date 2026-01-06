@@ -8,9 +8,6 @@
 import {
   CORPUS_SOURCES,
   getEnabledSources,
-  getSourcesByDomain,
-  getSourcesByBenchmark,
-  getSourcesByModality,
   type CorpusSource,
   type SourceType,
 } from './registry';

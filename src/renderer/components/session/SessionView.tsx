@@ -110,7 +110,7 @@ export const SessionView: React.FC<SessionViewProps> = ({
 
     // Focus input after task change
     setTimeout(() => {
-      if (task.format === 'free_response' || task.format === 'fill_blank') {
+      if (task.format === 'free_response' || task.format === 'fill_blank' || task.format === 'typing') {
         inputRef.current?.focus();
       }
     }, 100);
@@ -369,12 +369,22 @@ export const SessionView: React.FC<SessionViewProps> = ({
                 ref={inputRef}
                 value={answer}
                 onChange={(e) => setAnswer(e.target.value)}
-                placeholder="Type your answer..."
+                placeholder="Fill in the blank..."
                 size="lg"
                 disabled={submitting}
                 autoComplete="off"
                 autoCorrect="off"
                 spellCheck={false}
+              />
+            </div>
+          ) : task.format === 'typing' ? (
+            <div className="max-w-lg mx-auto">
+              <TypingInput
+                value={answer}
+                onChange={setAnswer}
+                expectedAnswer={task.expectedAnswer}
+                disabled={submitting}
+                inputRef={inputRef}
               />
             </div>
           ) : (
@@ -440,6 +450,8 @@ export const SessionView: React.FC<SessionViewProps> = ({
         <p className="text-center text-xs text-muted mt-4 opacity-60">
           {task.format === 'mcq'
             ? 'Press 1-4 to select an answer'
+            : task.format === 'typing'
+            ? 'Type the answer character by character, then press Enter'
             : 'Press Enter to submit'}
         </p>
       </GlassCard>
@@ -531,6 +543,135 @@ const MCQOptions: React.FC<MCQOptionsProps> = ({
           </button>
         );
       })}
+    </div>
+  );
+};
+
+// ============================================================================
+// TypingInput Component
+// ============================================================================
+
+interface TypingInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  expectedAnswer: string;
+  disabled?: boolean;
+  inputRef: React.RefObject<HTMLInputElement>;
+}
+
+/**
+ * Specialized input for typing tasks with real-time character feedback.
+ * Shows matching characters in green, mismatched in red.
+ */
+const TypingInput: React.FC<TypingInputProps> = ({
+  value,
+  onChange,
+  expectedAnswer,
+  disabled,
+  inputRef,
+}) => {
+  // Render character comparison
+  const renderComparison = () => {
+    if (!value) return null;
+
+    const chars: React.ReactNode[] = [];
+    const normalizedExpected = expectedAnswer.toLowerCase();
+    const normalizedValue = value.toLowerCase();
+
+    for (let i = 0; i < value.length; i++) {
+      const expectedChar = normalizedExpected[i];
+      const actualChar = normalizedValue[i];
+      const isCorrect = expectedChar === actualChar;
+      const displayChar = value[i]; // Show original case
+
+      chars.push(
+        <span
+          key={i}
+          className={`typing-char ${isCorrect ? 'correct' : 'incorrect'}`}
+        >
+          {displayChar}
+        </span>
+      );
+    }
+
+    // Show remaining expected characters as placeholders
+    if (value.length < expectedAnswer.length) {
+      const remaining = expectedAnswer.slice(value.length);
+      chars.push(
+        <span key="remaining" className="typing-remaining">
+          {remaining.replace(/./g, '_')}
+        </span>
+      );
+    }
+
+    return chars;
+  };
+
+  return (
+    <div className="typing-input-container">
+      {/* Character comparison display */}
+      <div className="typing-comparison mb-3 p-4 rounded-lg bg-slate-50 dark:bg-slate-800/50 min-h-[60px] text-center font-mono text-2xl tracking-wider">
+        {value ? renderComparison() : (
+          <span className="typing-placeholder text-slate-400 dark:text-slate-500">
+            {expectedAnswer.replace(/./g, '_')}
+          </span>
+        )}
+      </div>
+
+      {/* Hidden actual input */}
+      <div className="typing-input-wrapper">
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Start typing..."
+          disabled={disabled}
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          className="typing-input w-full px-4 py-3 rounded-lg border-2 border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-lg font-mono focus:border-blue-500 dark:focus:border-blue-400 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+      </div>
+
+      {/* Progress indicator */}
+      <div className="typing-progress mt-2 flex items-center justify-between text-sm text-muted">
+        <span>
+          {value.length} / {expectedAnswer.length} characters
+        </span>
+        <span className="typing-accuracy">
+          {value.length > 0 && (
+            <>
+              {(() => {
+                const correct = value.split('').filter((c, i) =>
+                  c.toLowerCase() === expectedAnswer[i]?.toLowerCase()
+                ).length;
+                const accuracy = Math.round((correct / value.length) * 100);
+                return `${accuracy}% accuracy`;
+              })()}
+            </>
+          )}
+        </span>
+      </div>
+
+      <style>{`
+        .typing-char.correct {
+          color: #22c55e; /* green-500 */
+        }
+        .typing-char.incorrect {
+          color: #ef4444; /* red-500 */
+          text-decoration: underline;
+          text-decoration-style: wavy;
+        }
+        .typing-remaining {
+          color: #94a3b8; /* slate-400 */
+          opacity: 0.6;
+        }
+        .typing-placeholder {
+          letter-spacing: 0.3em;
+        }
+      `}</style>
     </div>
   );
 };

@@ -166,6 +166,14 @@ export const IPC_CHANNELS = {
   SYSTEM_EXPORT_DATA: 'system:export-data',
   SYSTEM_IMPORT_DATA: 'system:import-data',
   SYSTEM_BACKUP: 'system:backup',
+
+  // Corpus Sources
+  CORPUS_LIST_SOURCES: 'goal:list-sources',
+  CORPUS_GET_RECOMMENDED: 'goal:get-recommended-sources',
+  CORPUS_POPULATE: 'goal:populate-vocabulary',
+  CORPUS_GET_STATUS: 'goal:get-population-status',
+  CORPUS_CLEAR: 'goal:clear-vocabulary',
+  CORPUS_UPLOAD: 'goal:upload-corpus',
 } as const;
 
 /**
@@ -851,6 +859,182 @@ export interface AppAPI {
 }
 
 /**
+ * Onboarding data collected from wizard
+ */
+export interface OnboardingData {
+  nativeLanguage: string;
+  targetLanguage: string;
+  domain: string;
+  modality: string[];
+  purpose: string;
+  benchmark?: string;
+  deadline?: string;
+  dailyTime: number;
+}
+
+/**
+ * Onboarding status check result
+ */
+export interface OnboardingStatus {
+  needsOnboarding: boolean;
+  hasUser: boolean;
+  hasGoals: boolean;
+  userId?: string;
+}
+
+/**
+ * Onboarding completion result
+ */
+export interface OnboardingResult {
+  userId: string;
+  goalId: string;
+  nativeLanguage: string;
+  targetLanguage: string;
+  domain: string;
+  modality: string[];
+  purpose: string;
+}
+
+/**
+ * Onboarding API for new user setup
+ */
+export interface OnboardingAPI {
+  checkStatus: () => Promise<OnboardingStatus>;
+  complete: (data: OnboardingData) => Promise<OnboardingResult>;
+  skip: () => Promise<{ userId: string; skipped: boolean }>;
+  getUser: () => Promise<{
+    id: string;
+    nativeLanguage: string;
+    targetLanguage: string;
+    hasActiveGoal: boolean;
+    activeGoal: GoalSpec | null;
+  } | null>;
+}
+
+/**
+ * Corpus source definition
+ */
+export interface CorpusSourceInfo {
+  id: string;
+  name: string;
+  description: string;
+  type: string;
+  domains: string[];
+  modalities: string[];
+  benchmarks: string[];
+  reliability: number;
+  priority?: number;
+}
+
+/**
+ * Ranked corpus source with score and reasons
+ */
+export interface RankedCorpusSource {
+  source: CorpusSourceInfo;
+  score: number;
+  reasons: string[];
+}
+
+/**
+ * Population result from corpus pipeline
+ */
+export interface VocabularyPopulationResult {
+  success: boolean;
+  goalId: string;
+  sourcesUsed: string[];
+  vocabularyCount: number;
+  collocationsCount: number;
+  errors: string[];
+  duration: number;
+}
+
+/**
+ * Population status for a goal
+ */
+export interface PopulationStatus {
+  hasVocabulary: boolean;
+  vocabularyCount: number;
+  lastUpdated: Date | null;
+}
+
+/**
+ * Corpus sources API
+ */
+export interface CorpusAPI {
+  listSources: () => Promise<{ sources: CorpusSourceInfo[] }>;
+  getRecommendedSources: (goalId: string, nlDescription?: string) => Promise<{
+    recommended: RankedCorpusSource[];
+    defaultSourceIds: string[];
+  }>;
+  populateVocabulary: (
+    goalId: string,
+    options?: {
+      nlDescription?: string;
+      selectedSourceIds?: string[];
+      maxSources?: number;
+      targetVocabSize?: number;
+    }
+  ) => Promise<VocabularyPopulationResult>;
+  getPopulationStatus: (goalId: string) => Promise<PopulationStatus>;
+  clearVocabulary: (goalId: string) => Promise<{ cleared: boolean; deletedCount: number }>;
+  uploadDocuments: (
+    goalId: string,
+    documents: Array<{ filename: string; content: string; mimeType: string }>
+  ) => Promise<{ documentsProcessed: number; tokensExtracted: number; vocabularyInserted: number }>;
+}
+
+/**
+ * Offline queue statistics
+ */
+export interface OfflineQueueStats {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  total: number;
+  byType: {
+    task_generation: number;
+    error_analysis: number;
+    content_generation: number;
+    vocabulary_extraction: number;
+  };
+}
+
+/**
+ * Sync status response
+ */
+export interface SyncStatus {
+  online: boolean;
+  pendingItems: number;
+  processingItems: number;
+  failedItems: number;
+  lastSync: string;
+}
+
+/**
+ * Force sync result
+ */
+export interface ForceSyncResult {
+  processed: number;
+  remaining: number;
+  failed: number;
+}
+
+/**
+ * Sync & offline queue management API
+ */
+export interface SyncAPI {
+  getStatus: () => Promise<SyncStatus>;
+  forceSync: () => Promise<ForceSyncResult>;
+  getQueueSize: () => Promise<{ count: number }>;
+  getQueueStats: () => Promise<OfflineQueueStats>;
+  clearCompleted: (olderThanHours?: number) => Promise<{ cleared: number }>;
+  retryFailed: () => Promise<{ retried: number }>;
+  setOnline: (online: boolean) => Promise<{ online: boolean }>;
+  checkConnectivity: () => Promise<{ online: boolean }>;
+}
+
+/**
  * Structured API exposed to renderer via contextBridge.
  * This provides a clean, organized interface for renderer code.
  */
@@ -863,6 +1047,9 @@ export interface LogosAPI {
   analytics: AnalyticsAPI;
   profile: ProfileAPI;
   claude: ClaudeAPI;
+  corpus: CorpusAPI;
+  sync: SyncAPI;
+  onboarding: OnboardingAPI;
   app: AppAPI;
 }
 
