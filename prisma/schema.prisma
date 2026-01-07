@@ -110,9 +110,10 @@ model LanguageObject {
   // Computed priority using S_eff formula
   priority Float @default(0)
 
-  // IRT parameters
-  irtDifficulty      Float @default(0)
-  irtDiscrimination  Float @default(1)
+  // IRT parameters (2PL/3PL)
+  irtDifficulty      Float @default(0)    // b: difficulty (-4 to 4)
+  irtDiscrimination  Float @default(1)    // a: discrimination (0.1 to 3)
+  irtGuessing        Float @default(0.25) // c: guessing parameter for 3PL (0 to 0.5)
 
   goalId String
   goal   GoalSpec @relation(fields: [goalId], references: [id], onDelete: Cascade)
@@ -123,6 +124,7 @@ model LanguageObject {
   collocatedBy    Collocation[] @relation("word2")
   errorAnalyses   ErrorAnalysis[]
 
+  @@unique([goalId, content])
   @@index([goalId, type])
   @@index([goalId, priority(sort: Desc)])
   @@index([goalId, morphologicalScore])
@@ -162,6 +164,7 @@ model MasteryState {
   fsrsDifficulty   Float    @default(5)
   fsrsStability    Float    @default(0)
   fsrsLastReview   DateTime?
+  fsrsNextReview   DateTime? // Next scheduled review
   fsrsReps         Int      @default(0)
   fsrsLapses       Int      @default(0)
   fsrsState        String   @default("new")
@@ -172,14 +175,48 @@ model MasteryState {
   exposureCount      Int   @default(0)
 
   // Scheduling
-  nextReview DateTime?
-  priority   Float    @default(0)
+  nextReview     DateTime?
+  lastReviewedAt DateTime?
+  priority       Float    @default(0)
 
   objectId String         @unique
   object   LanguageObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
 
+  // Stage transition history
+  stageTransitions StageTransition[]
+
   @@index([nextReview])
   @@index([priority(sort: Desc)])
+}
+
+// ========== STAGE TRANSITION LOG ==========
+
+model StageTransition {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // The mastery state this transition belongs to
+  masteryStateId String
+  masteryState   MasteryState @relation(fields: [masteryStateId], references: [id], onDelete: Cascade)
+
+  // Transition details
+  fromStage Int
+  toStage   Int
+
+  // What triggered this transition
+  trigger String // 'correct_streak', 'accuracy_threshold', 'time_decay', 'manual', 'lapse'
+
+  // Context at time of transition
+  cueFreeAccuracyAtTransition    Float
+  cueAssistedAccuracyAtTransition Float
+  exposureCountAtTransition      Int
+
+  // Additional metadata (JSON)
+  metadata String? // e.g., {"streakLength": 5, "sessionId": "..."}
+
+  @@index([masteryStateId])
+  @@index([createdAt(sort: Desc)])
+  @@index([fromStage, toStage])
 }
 
 // ========== SESSIONS & RESPONSES ==========
@@ -197,6 +234,10 @@ model Session {
   stageTransitions  Int @default(0)
   fluencyTaskCount  Int @default(0)
   versatilityTaskCount Int @default(0)
+
+  // Additional metrics for scoring-update.service.ts transaction
+  responseCount Int @default(0)
+  correctCount  Int @default(0)
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -224,9 +265,11 @@ model Response {
   responseTimeMs Int
   cueLevel      Int     @default(0) // 0 = cue-free, 1-3 = assisted
 
-  // Raw response (for analysis)
-  responseContent String?
-  expectedContent String?
+  // Raw response (for analysis) - dual naming for compatibility
+  response        String? // User's actual response
+  expected        String? // Expected correct answer
+  responseContent String? // Legacy field, kept for backward compat
+  expectedContent String? // Legacy field, kept for backward compat
 
   // IRT scoring (evaluation mode only)
   irtThetaContribution Float?
@@ -374,4 +417,480 @@ model OfflineQueueItem {
 
   @@index([status, createdAt])
   @@index([type, status])
+}
+
+// ========== USER-OBJECT RELATIONSHIP GRAPH (Priority 1) ==========
+
+model UserObjectRelationship {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId   String
+  objectId String
+
+  // Relationship state
+  relationshipType String // 'unknown', 'learning', 'mastered', 'lapsed'
+  strength         Float  @default(0) // 0-1 connection strength
+
+  // Encounter tracking
+  encounterCount   Int      @default(0)
+  lastEncounter    DateTime?
+  firstEncounter   DateTime?
+
+  // Learning metrics
+  successRate      Float @default(0)
+  avgResponseTime  Int   @default(0) // milliseconds
+
+  // Graph properties
+  activationLevel  Float @default(0) // Current spreading activation
+  decayRate        Float @default(0.1) // How fast activation decays
+
+  @@unique([userId, objectId])
+  @@index([userId, relationshipType])
+  @@index([userId, strength(sort: Desc)])
+  @@index([userId, lastEncounter])
+}
+
+model ObjectConnection {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Connected objects
+  sourceObjectId String
+  targetObjectId String
+
+  // Connection properties
+  connectionType String // 'semantic', 'phonological', 'morphological', 'collocational', 'syntactic'
+  weight         Float  @default(0.5) // Connection strength
+  bidirectional  Boolean @default(true)
+
+  // Evidence for connection
+  cooccurrenceCount Int   @default(0)
+  pmi               Float @default(0) // Pointwise mutual information
+
+  @@unique([sourceObjectId, targetObjectId, connectionType])
+  @@index([sourceObjectId])
+  @@index([targetObjectId])
+  @@index([connectionType])
+}
+
+model SpreadingActivationLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  userId        String
+  sourceObjectId String
+
+  // Activation parameters
+  initialActivation Float
+  decayFactor       Float
+  spreadDepth       Int
+
+  // Results (JSON array of {objectId, activation})
+  activatedObjects String
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ========== G2P-IRT INTEGRATION (Priority 2) ==========
+
+model G2PThetaProfile {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String @unique
+
+  // Overall phonological ability
+  thetaPhonological Float @default(0)
+
+  // Layer-specific theta values (G2P hierarchy)
+  thetaAlphabetic Float @default(0) // Letter-sound correspondence
+  thetaSyllable   Float @default(0) // Syllable patterns
+  thetaWord       Float @default(0) // Whole-word recognition
+  thetaSupra      Float @default(0) // Suprasegmental (stress, intonation)
+
+  // Modality-specific theta
+  thetaReading  Float @default(0)
+  thetaWriting  Float @default(0)
+  thetaListening Float @default(0)
+  thetaSpeaking Float @default(0)
+
+  // Standard errors
+  sePhonological Float @default(1)
+  seAlphabetic   Float @default(1)
+  seSyllable     Float @default(1)
+  seWord         Float @default(1)
+  seSupra        Float @default(1)
+
+  // Response counts for each area (JSON object)
+  responseCounts String @default("{}")
+
+  @@index([thetaPhonological])
+}
+
+model G2PItemParameter {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Pattern identifier
+  pattern     String // The G2P pattern (e.g., "ough", "tion", "ph")
+  patternType String // 'grapheme', 'phoneme', 'syllable', 'stress'
+
+  // IRT 2PL parameters
+  difficulty     Float @default(0) // b parameter
+  discrimination Float @default(1) // a parameter
+
+  // Additional metadata
+  targetLayer String // 'alphabetic', 'syllable', 'word', 'supra'
+  frequency   Float  @default(0)
+  regularity  Float  @default(1) // How regular the pattern is (0-1)
+
+  // L1-specific difficulty adjustments (JSON object)
+  l1Adjustments String @default("{}")
+
+  @@unique([pattern, patternType])
+  @@index([targetLayer])
+  @@index([difficulty])
+}
+
+model G2PResponse {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  userId    String
+  patternId String
+
+  // Response details
+  correct       Boolean
+  responseTimeMs Int
+  modality      String // 'reading', 'writing', 'listening', 'speaking'
+  targetLayer   String // 'alphabetic', 'syllable', 'word', 'supra', 'auto'
+
+  // Context
+  wordContext String? // The word in which the pattern appeared
+  taskType    String  // 'recognition', 'production', 'discrimination'
+
+  // Theta update information
+  priorTheta     Float
+  posteriorTheta Float
+  information    Float // Fisher information gained
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([patternId])
+  @@index([userId, modality])
+}
+
+// ========== MULTI-CURRICULUM MANAGEMENT (Priority 3) ==========
+
+model CurriculumGoal {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String
+
+  // Goal definition
+  name        String
+  domain      String // 'medical', 'legal', 'business', etc.
+  targetTheta Float  @default(2.0)
+  currentTheta Float @default(0)
+  deadline    DateTime?
+  weight      Float  @default(1.0) // Priority weight
+
+  // Progress tracking
+  totalObjects    Int @default(0)
+  masteredObjects Int @default(0)
+  isActive        Boolean @default(true)
+
+  // Modalities (JSON array)
+  modalities String @default("[\"reading\"]")
+
+  // Link to GoalSpec (optional, for migration)
+  goalSpecId String?
+
+  allocations TimeAllocation[]
+  sharedObjects SharedObjectGoal[]
+
+  @@index([userId, isActive])
+  @@index([userId, deadline])
+}
+
+model TimeAllocation {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  goalId    String
+  goal      CurriculumGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  // Allocation details
+  sessionDate    DateTime
+  allocatedMinutes Int
+  actualMinutes   Int @default(0)
+
+  // Pareto optimization metadata
+  paretoRank     Int @default(0)
+  utilityScore   Float @default(0)
+
+  @@index([goalId, sessionDate])
+}
+
+model SharedObjectGoal {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  objectId String
+  goalId   String
+  goal     CurriculumGoal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  // Relevance to this goal
+  relevance Float @default(1.0)
+
+  // Transfer potential
+  transferWeight Float @default(0.5)
+
+  @@unique([objectId, goalId])
+  @@index([objectId])
+}
+
+model ParetoSolution {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  userId      String
+  sessionDate DateTime
+
+  // Solution details (JSON: {goalId: allocatedMinutes})
+  allocation String
+
+  // Pareto metrics
+  paretoRank  Int
+  dominated   Boolean @default(false)
+
+  // Multi-objective scores (JSON: {goalId: expectedProgress})
+  objectiveScores String
+
+  @@index([userId, sessionDate])
+}
+
+// ========== DYNAMIC CORPUS SOURCING (Priority 4) ==========
+
+model CorpusSource {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Source identification
+  name        String @unique
+  sourceType  String // 'api', 'file', 'embedded'
+  endpoint    String? // API endpoint or file path
+
+  // Capabilities
+  domains   String // JSON array of supported domains
+  languages String // JSON array of supported languages
+
+  // Status
+  isAvailable  Boolean @default(true)
+  requiresAuth Boolean @default(false)
+  priority     Int     @default(0)
+
+  // Rate limiting
+  rateLimitPerMinute Int @default(60)
+  lastQueryAt        DateTime?
+
+  queries CorpusQuery[]
+  cache   CorpusCache[]
+
+  @@index([isAvailable, priority(sort: Desc)])
+}
+
+model CorpusQuery {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  sourceId String
+  source   CorpusSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  // Query parameters
+  domain       String
+  targetLevel  Float
+  queryType    String // 'vocabulary', 'sentence', 'text'
+  filters      String? // JSON object of additional filters
+
+  // Results
+  resultCount Int @default(0)
+  cacheHit    Boolean @default(false)
+  latencyMs   Int @default(0)
+
+  // Error tracking
+  success Boolean @default(true)
+  error   String?
+
+  @@index([sourceId, createdAt(sort: Desc)])
+  @@index([domain, targetLevel])
+}
+
+model CorpusCache {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  sourceId String
+  source   CorpusSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  // Cache key
+  cacheKey String @unique
+
+  // Cached content (JSON)
+  content String
+
+  // Metadata
+  domain      String
+  targetLevel Float
+  itemCount   Int
+
+  @@index([cacheKey])
+  @@index([expiresAt])
+  @@index([domain, targetLevel])
+}
+
+model ExtractedVocabulary {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Source information
+  sourceId   String?
+  sourceName String
+  domain     String
+
+  // Extracted item
+  term       String
+  definition String?
+  examples   String? // JSON array of example sentences
+
+  // Difficulty estimation
+  estimatedDifficulty Float
+  frequencyRank       Int?
+
+  // Domain relevance
+  domainRelevance Float @default(1.0)
+  termFrequency   Int   @default(1)
+
+  // Status
+  isVerified Boolean @default(false)
+  isImported Boolean @default(false) // Imported to LanguageObject
+
+  @@unique([term, domain])
+  @@index([domain, estimatedDifficulty])
+  @@index([isImported])
+}
+
+// ========== ONBOARDING UX (Priority 5) ==========
+
+model OnboardingSession {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String?
+
+  // Session state
+  currentStepId String?
+  status        String @default("in_progress") // 'in_progress', 'completed', 'abandoned'
+
+  // Natural language input
+  originalInput String?
+  parsedGoal    String? // JSON of ParsedGoal
+
+  // Completion tracking
+  completedSteps String @default("[]") // JSON array of step IDs
+  skippedSteps   String @default("[]") // JSON array of step IDs
+
+  // Collected responses (JSON object: stepId -> response)
+  responses String @default("{}")
+
+  // Final goal configuration
+  finalGoalConfig String? // JSON of final goal specification
+
+  steps OnboardingStep[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model OnboardingStep {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  sessionId String
+  session   OnboardingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Step definition
+  stepType      String // 'welcome', 'choice', 'input', 'confirm', 'info'
+  stepOrder     Int
+  cognitiveLoad String @default("low") // 'low', 'medium', 'high'
+  isRequired    Boolean @default(false)
+
+  // Content (JSON based on stepType)
+  content String
+
+  // Validation rules (JSON)
+  validation String?
+
+  // Response
+  response    String?
+  completedAt DateTime?
+  skipped     Boolean @default(false)
+
+  @@index([sessionId, stepOrder])
+}
+
+model ParsedGoalHistory {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  userId String?
+
+  // Original input
+  naturalLanguageInput String
+
+  // Parsed result (JSON of ParsedGoal)
+  parsedResult String
+
+  // Confidence scores
+  overallConfidence Float
+  domainConfidence  Float
+  timelineConfidence Float
+  modalityConfidence Float
+
+  // Validation status
+  isValid          Boolean
+  validationErrors String? // JSON array of error messages
+
+  // Whether this was accepted by user
+  wasAccepted Boolean @default(false)
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model ClarifyingQuestion {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  // Context
+  parsedGoalId String?
+  targetField  String // Which field this question clarifies
+
+  // Question content
+  question String
+  options  String? // JSON array of options
+  priority Int @default(0)
+
+  // Response
+  response    String?
+  respondedAt DateTime?
+
+  @@index([parsedGoalId])
 }

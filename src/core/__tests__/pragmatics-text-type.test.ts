@@ -160,7 +160,8 @@ describe('Text Type Analysis (Biber 1988)', () => {
       const stats = getDomainStatistics('legal');
 
       expect(stats.domain).toBe('legal');
-      expect(stats.typicalDimensionalScores.argumentative).toBeUndefined; // It's a dimension, not a score
+      // DimensionalScores uses dimension names like overtPersuasion, not 'argumentative'
+      expect(stats.typicalDimensionalScores.overtPersuasion).toBeDefined();
       // Legal domain should have high explicit reference
       expect(stats.typicalDimensionalScores.explicitVsSituationDependent).toBeGreaterThan(0.5);
     });

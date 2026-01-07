@@ -7,11 +7,10 @@
 
 import { PrismaClient } from '@prisma/client';
 
-// Declare global type for development singleton
-declare global {
-  // eslint-disable-next-line no-var
-  var prisma: PrismaClient | undefined;
-}
+// Use a unique global key to avoid conflicts with other modules
+const globalForPrisma = globalThis as unknown as {
+  __prismaClient: PrismaClient | undefined;
+};
 
 /**
  * Singleton PrismaClient instance
@@ -21,7 +20,7 @@ declare global {
  * In production, we always create a fresh instance.
  */
 export const prisma: PrismaClient =
-  global.prisma ??
+  globalForPrisma.__prismaClient ??
   new PrismaClient({
     log:
       process.env.NODE_ENV === 'development'
@@ -31,7 +30,7 @@ export const prisma: PrismaClient =
 
 // Store on global in development to survive HMR
 if (process.env.NODE_ENV !== 'production') {
-  global.prisma = prisma;
+  globalForPrisma.__prismaClient = prisma;
 }
 
 /**

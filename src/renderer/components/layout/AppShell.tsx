@@ -135,7 +135,7 @@ export const AppShell: React.FC<AppShellProps> = ({
       <style>{`
         .app-shell {
           display: flex;
-          min-height: 100vh;
+          height: 100vh;
           width: 100%;
         }
 
@@ -158,7 +158,7 @@ export const AppShell: React.FC<AppShellProps> = ({
           flex: 1;
           display: flex;
           flex-direction: column;
-          min-height: 100vh;
+          height: 100vh;
           margin-left: var(--sidebar-width);
           transition: margin-left var(--duration-300) var(--ease-glass);
         }
@@ -181,6 +181,7 @@ export const AppShell: React.FC<AppShellProps> = ({
           flex: 1;
           padding: var(--space-6);
           overflow-y: auto;
+          overflow-x: hidden;
         }
 
         /* Focus mode - sidebar hidden */

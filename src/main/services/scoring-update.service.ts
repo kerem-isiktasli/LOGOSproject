@@ -372,6 +372,7 @@ function calculateThetaContribution(
 
 /**
  * Process a user response through the complete pipeline.
+ * Uses a transaction to ensure data consistency across all updates.
  */
 export async function processResponse(
   userId: string,
@@ -382,10 +383,10 @@ export async function processResponse(
   const { task, response, responseTimeMs, hintsUsed } = userResponse;
   const { spec } = task;
 
-  // 1. Evaluate correctness
+  // 1. Evaluate correctness (pure function, no DB)
   const evaluation = evaluateResponse(response, task.expectedAnswer, config);
 
-  // 2. Get current mastery state
+  // 2. Get current state before transaction
   const object = await db.languageObject.findUnique({
     where: { id: spec.objectId },
     include: { masteryState: true },
@@ -402,88 +403,124 @@ export async function processResponse(
   // 3. Determine cue level from hints used
   const effectiveCueLevel = Math.min(hintsUsed, spec.cueLevel) as 0 | 1 | 2 | 3;
 
-  // 4. Record the response
-  const responseRecord = await recordResponse({
-    sessionId: userResponse.sessionId,
-    objectId: spec.objectId,
-    taskType: task.metadata.source,
-    taskFormat: spec.format,
-    modality: spec.modality,
-    correct: evaluation.correct,
-    responseTimeMs,
-    cueLevel: effectiveCueLevel,
-    responseContent: response,
-    expectedContent: task.expectedAnswer,
-  });
-
-  // 5. Update exposure and accuracy
-  await recordExposure(spec.objectId, evaluation.correct, effectiveCueLevel);
-
-  // 6. Get updated mastery state
-  const updatedMastery = await db.masteryState.findUnique({
-    where: { objectId: spec.objectId },
-  });
-
-  if (!updatedMastery) {
-    throw new Error(`Mastery state not found after update: ${spec.objectId}`);
-  }
-
-  // 7. Determine stage transition
-  const stageTransition = determineStageTransition(
-    previousStage,
-    updatedMastery.cueFreeAccuracy,
-    updatedMastery.cueAssistedAccuracy
-  );
-
-  if (stageTransition.changed) {
-    await transitionStage(spec.objectId, stageTransition.newStage);
-    await recordStageTransition(userResponse.sessionId);
-  }
-
-  // 8. Calculate and apply FSRS update
+  // 4. Calculate all updates before transaction
   const fsrsUpdate = calculateFSRSUpdate(
     evaluation.correct,
-    updatedMastery.fsrsDifficulty,
-    updatedMastery.fsrsStability,
+    mastery?.fsrsDifficulty ?? 5,
+    mastery?.fsrsStability ?? 1,
     responseTimeMs
   );
 
-  await updateFSRSParameters(
-    spec.objectId,
-    fsrsUpdate.difficulty,
-    fsrsUpdate.stability,
-    fsrsUpdate.nextReview,
-    fsrsUpdate.rating
-  );
+  // 5. Execute all database updates in a single transaction
+  const transactionResult = await db.$transaction(async (tx) => {
+    // 5a. Record the response
+    const responseRecord = await tx.response.create({
+      data: {
+        sessionId: userResponse.sessionId,
+        objectId: spec.objectId,
+        taskType: task.metadata.source,
+        taskFormat: spec.format,
+        modality: spec.modality,
+        correct: evaluation.correct,
+        responseTimeMs,
+        cueLevel: effectiveCueLevel,
+        response: response,
+        expected: task.expectedAnswer,
+      },
+    });
 
-  // 9. Recalculate priority
-  const masteryAdjustment = calculateMasteryAdjustment(
-    stageTransition.newStage,
-    updatedMastery.cueFreeAccuracy,
-    updatedMastery.cueAssistedAccuracy - updatedMastery.cueFreeAccuracy
-  );
-  const urgencyScore = calculateUrgencyScore(fsrsUpdate.nextReview);
+    // 5b. Update exposure and accuracy (EMA calculation)
+    const alpha = 0.3; // EMA smoothing factor
+    const newExposureCount = (mastery?.exposureCount ?? 0) + 1;
+    const correctValue = evaluation.correct ? 1 : 0;
 
-  // Check if this object's component is a bottleneck
-  const componentCode = mapTypeToComponent(object.type);
-  const bottlenecks = await detectBottlenecks(userId, object.goalId);
-  const isBottleneck = bottlenecks.some(
-    (b) => b.component === componentCode && b.isBottleneck
-  );
+    let newCueFreeAccuracy = mastery?.cueFreeAccuracy ?? 0;
+    let newCueAssistedAccuracy = mastery?.cueAssistedAccuracy ?? 0;
 
-  const newPriority = calculateEffectivePriority(
-    object.priority * 0.8, // Decay base priority slightly
-    masteryAdjustment,
-    urgencyScore,
-    isBottleneck
-  );
+    if (effectiveCueLevel === 0) {
+      // Cue-free response
+      newCueFreeAccuracy = alpha * correctValue + (1 - alpha) * newCueFreeAccuracy;
+    } else {
+      // Cue-assisted response
+      newCueAssistedAccuracy = alpha * correctValue + (1 - alpha) * newCueAssistedAccuracy;
+    }
 
-  await updateObjectPriority(spec.objectId, newPriority);
+    // 5c. Determine stage transition
+    const stageTransition = determineStageTransition(
+      previousStage,
+      newCueFreeAccuracy,
+      newCueAssistedAccuracy
+    );
 
-  // 10. Record task type for fluency/versatility tracking
-  await recordTaskType(userResponse.sessionId, spec.isFluencyTask);
+    // 5d. Update mastery state
+    await tx.masteryState.upsert({
+      where: { objectId: spec.objectId },
+      update: {
+        stage: stageTransition.newStage,
+        cueFreeAccuracy: newCueFreeAccuracy,
+        cueAssistedAccuracy: newCueAssistedAccuracy,
+        exposureCount: newExposureCount,
+        fsrsDifficulty: fsrsUpdate.difficulty,
+        fsrsStability: fsrsUpdate.stability,
+        fsrsNextReview: fsrsUpdate.nextReview,
+        lastReviewedAt: new Date(),
+      },
+      create: {
+        objectId: spec.objectId,
+        stage: stageTransition.newStage,
+        cueFreeAccuracy: newCueFreeAccuracy,
+        cueAssistedAccuracy: newCueAssistedAccuracy,
+        exposureCount: newExposureCount,
+        fsrsDifficulty: fsrsUpdate.difficulty,
+        fsrsStability: fsrsUpdate.stability,
+        fsrsNextReview: fsrsUpdate.nextReview,
+      },
+    });
 
-  // 11. Calculate theta contribution
+    // 5e. Recalculate priority
+    const masteryAdjustment = calculateMasteryAdjustment(
+      stageTransition.newStage,
+      newCueFreeAccuracy,
+      newCueAssistedAccuracy - newCueFreeAccuracy
+    );
+    const urgencyScore = calculateUrgencyScore(fsrsUpdate.nextReview);
+
+    const newPriority = calculateEffectivePriority(
+      object.priority * 0.8,
+      masteryAdjustment,
+      urgencyScore,
+      false // Bottleneck check done outside transaction
+    );
+
+    // 5f. Update object priority
+    await tx.languageObject.update({
+      where: { id: spec.objectId },
+      data: { priority: newPriority },
+    });
+
+    // 5g. Update session stats
+    await tx.session.update({
+      where: { id: userResponse.sessionId },
+      data: {
+        responseCount: { increment: 1 },
+        correctCount: evaluation.correct ? { increment: 1 } : undefined,
+        stageTransitions: stageTransition.changed ? { increment: 1 } : undefined,
+        fluencyTaskCount: spec.isFluencyTask ? { increment: 1 } : undefined,
+        versatilityTaskCount: !spec.isFluencyTask ? { increment: 1 } : undefined,
+      },
+    });
+
+    return {
+      responseRecord,
+      stageTransition,
+      newCueFreeAccuracy,
+      newPriority,
+    };
+  });
+
+  // 6. Post-transaction operations (non-critical, can fail independently)
+
+  // 6a. Calculate and apply theta contribution
   let thetaContribution: Partial<ThetaState> | undefined;
 
   if (config.sessionMode !== 'learning') {
@@ -494,43 +531,67 @@ export async function processResponse(
       spec.type
     );
 
-    // Apply theta rules
-    await applyThetaRules(userId, config.sessionMode, thetaContribution);
+    // Apply theta rules (separate transaction, non-critical)
+    try {
+      await applyThetaRules(userId, config.sessionMode, thetaContribution);
+    } catch (err) {
+      console.error('Theta update failed (non-critical):', err);
+    }
   }
 
-  // 12. Create error analysis for incorrect responses
+  // 6b. Create error analysis for incorrect responses
   if (!evaluation.correct) {
-    const componentCode = mapTypeToComponent(spec.type);
-    const errorAnalysis = analyzeError(
-      normalizeResponse(response),
-      normalizeResponse(task.expectedAnswer)
-    );
+    try {
+      const componentCode = mapTypeToComponent(spec.type);
+      const errorAnalysis = analyzeError(
+        normalizeResponse(response),
+        normalizeResponse(task.expectedAnswer)
+      );
 
-    await createErrorAnalysis({
-      responseId: responseRecord.id,
-      objectId: spec.objectId,
-      component: componentCode,
-      errorType: errorAnalysis.type,
-      explanation: errorAnalysis.explanation,
-      correction: evaluation.correction ?? task.expectedAnswer,
-    });
+      await createErrorAnalysis({
+        responseId: transactionResult.responseRecord.id,
+        objectId: spec.objectId,
+        component: componentCode,
+        errorType: errorAnalysis.type,
+        explanation: errorAnalysis.explanation,
+        correction: evaluation.correction ?? task.expectedAnswer,
+      });
 
-    // Update component stats
-    await recalculateComponentStats(userId);
+      // Update component stats (non-critical)
+      await recalculateComponentStats(userId);
+    } catch (err) {
+      console.error('Error analysis failed (non-critical):', err);
+    }
   }
+
+  // 6c. Check bottleneck and adjust priority if needed (async, non-blocking)
+  detectBottlenecks(userId, object.goalId).then(async (bottlenecks) => {
+    const componentCode = mapTypeToComponent(object.type);
+    const isBottleneck = bottlenecks.some(
+      (b) => b.component === componentCode && b.isBottleneck
+    );
+    if (isBottleneck) {
+      // Boost priority for bottleneck items
+      const boostedPriority = transactionResult.newPriority * 1.2;
+      await db.languageObject.update({
+        where: { id: spec.objectId },
+        data: { priority: boostedPriority },
+      }).catch((err) => console.error('Bottleneck priority boost failed:', err));
+    }
+  }).catch((err) => console.error('Bottleneck detection failed:', err));
 
   return {
-    responseId: responseRecord.id,
+    responseId: transactionResult.responseRecord.id,
     evaluation,
     masteryUpdate: {
       previousStage,
-      newStage: stageTransition.newStage,
-      stageChanged: stageTransition.changed,
-      newAccuracy: updatedMastery.cueFreeAccuracy,
+      newStage: transactionResult.stageTransition.newStage,
+      stageChanged: transactionResult.stageTransition.changed,
+      newAccuracy: transactionResult.newCueFreeAccuracy,
     },
     priorityUpdate: {
       previousPriority,
-      newPriority,
+      newPriority: transactionResult.newPriority,
     },
     fsrsUpdate: {
       nextReview: fsrsUpdate.nextReview,

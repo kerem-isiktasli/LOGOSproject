@@ -83,16 +83,16 @@ export const VocabularyPage: React.FC<VocabularyPageProps> = ({ goalId, onNaviga
 
     setIsLoading(true);
     try {
-      // Load language objects
-      const result = await window.logos.goal.getLanguageObjects(goalId, {
+      // Load language objects using object.list API
+      const result = await window.logos.object.list(goalId, {
         limit: 500,
-        includeCollocations: true,
       });
 
-      setObjects(result.objects || []);
+      // Handle both array and object response formats
+      const objectList = Array.isArray(result) ? result : (result as any).objects || [];
+      setObjects(objectList);
 
       // Calculate stats
-      const objectList = result.objects || [];
       const byType: Record<string, number> = {};
       const byStage: Record<number, number> = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0 };
       let totalFreq = 0;

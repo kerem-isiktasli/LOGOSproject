@@ -315,7 +315,7 @@ export class ContentQualityValidator {
 
     // Scaffolding appropriate
     if (intentMeta.scaffoldingLevel > 0 && spec.scaffolding.maxHints > 0) {
-      const hasHints = content.hints && content.hints.length > 0;
+      const hasHints = !!(content.hints && content.hints.length > 0);
       checks.push({
         name: 'scaffolding_available',
         category: 'pedagogical',
@@ -336,7 +336,7 @@ export class ContentQualityValidator {
     const checks: ValidationCheck[] = [];
 
     // Content not empty
-    const hasContent = content.content && content.content.trim().length > 0;
+    const hasContent = !!(content.content && content.content.trim().length > 0);
     checks.push({
       name: 'content_not_empty',
       category: 'technical',

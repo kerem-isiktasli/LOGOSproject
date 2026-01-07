@@ -167,6 +167,22 @@ export const IPC_CHANNELS = {
   SYSTEM_IMPORT_DATA: 'system:import-data',
   SYSTEM_BACKUP: 'system:backup',
 
+  // Learning Objects CRUD
+  OBJECT_CREATE: 'object:create',
+  OBJECT_LIST: 'object:list',
+  OBJECT_UPDATE: 'object:update',
+  OBJECT_DELETE: 'object:delete',
+  OBJECT_IMPORT: 'object:import',
+
+  // Agent channels
+  AGENT_DETECT_TRIGGERS: 'agent:detectTriggers',
+  AGENT_REGISTER_BOTTLENECK: 'agent:registerBottleneck',
+  AGENT_GET_BOTTLENECKS: 'agent:getBottlenecks',
+  AGENT_RESOLVE_BOTTLENECK: 'agent:resolveBottleneck',
+  AGENT_GET_TRIGGER_HISTORY: 'agent:getTriggerHistory',
+  AGENT_GENERATE_SPEC: 'agent:generateSpec',
+  AGENT_CLEAR_HISTORY: 'agent:clearHistory',
+
   // Corpus Sources
   CORPUS_LIST_SOURCES: 'goal:list-sources',
   CORPUS_GET_RECOMMENDED: 'goal:get-recommended-sources',
@@ -627,6 +643,57 @@ export interface IPCHandlerMap {
     request: ObjectGetMasteryRequest;
     response: ObjectGetMasteryResponse;
   };
+  [IPC_CHANNELS.OBJECT_CREATE]: {
+    request: { goalId: string; content: string; type: string; frequency?: number; relationalDensity?: number; contextualContribution?: number; irtDifficulty?: number; metadata?: Record<string, unknown> };
+    response: LanguageObject;
+  };
+  [IPC_CHANNELS.OBJECT_LIST]: {
+    request: { goalId: string; type?: string; limit?: number; offset?: number };
+    response: { objects: LanguageObject[]; total: number };
+  };
+  [IPC_CHANNELS.OBJECT_UPDATE]: {
+    request: { id: string; updates: Partial<LanguageObject> };
+    response: LanguageObject;
+  };
+  [IPC_CHANNELS.OBJECT_DELETE]: {
+    request: { id: string };
+    response: { deleted: boolean };
+  };
+  [IPC_CHANNELS.OBJECT_IMPORT]: {
+    request: { goalId: string; objects: Array<Partial<LanguageObject> & { content: string }> };
+    response: { imported: number; errors: string[] };
+  };
+
+  // Agent
+  [IPC_CHANNELS.AGENT_DETECT_TRIGGERS]: {
+    request: { operation: string; location: string[]; layers: string[]; issues?: string[]; securitySensitive?: boolean; externalApi?: boolean };
+    response: { triggers: Array<{ agent: string; confidence: number; reason: string }> };
+  };
+  [IPC_CHANNELS.AGENT_REGISTER_BOTTLENECK]: {
+    request: { type: string; description: string; severity: number; location: string; agentType?: string };
+    response: { id: string; registered: boolean };
+  };
+  [IPC_CHANNELS.AGENT_GET_BOTTLENECKS]: {
+    request: { active?: boolean; limit?: number };
+    response: { bottlenecks: Array<{ id: string; type: string; description: string; severity: number; location: string; resolved: boolean }> };
+  };
+  [IPC_CHANNELS.AGENT_RESOLVE_BOTTLENECK]: {
+    request: { id: string; resolution: string };
+    response: { resolved: boolean };
+  };
+  [IPC_CHANNELS.AGENT_GET_TRIGGER_HISTORY]: {
+    request: { limit?: number };
+    response: { history: Array<{ timestamp: string; operation: string; triggeredAgents: string[] }> };
+  };
+  [IPC_CHANNELS.AGENT_GENERATE_SPEC]: {
+    request: { bottleneckId: string };
+    response: { spec: string };
+  };
+  [IPC_CHANNELS.AGENT_CLEAR_HISTORY]: {
+    request: void;
+    response: { cleared: boolean };
+  };
+
 
   // User
   [IPC_CHANNELS.USER_GET_PROFILE]: {
@@ -746,12 +813,14 @@ export type IPCHandler<T extends IPCChannel> = (
 
 /**
  * Goal management API
+ *
+ * Goals use the GoalSpec schema with domain/modality/genre/purpose fields.
  */
 export interface GoalAPI {
-  create: (data: { name: string; targetLanguage: string; nativeLanguage: string; description?: string }) => Promise<GoalSpec>;
+  create: (data: GoalCreateRequest) => Promise<GoalSpec>;
   get: (id: string) => Promise<GoalSpec | null>;
   list: (includeInactive?: boolean) => Promise<GoalSpec[]>;
-  update: (data: { id: string; name?: string; description?: string; isActive?: boolean }) => Promise<GoalSpec>;
+  update: (data: GoalUpdateRequest) => Promise<GoalSpec>;
   delete: (id: string, hard?: boolean) => Promise<void>;
 }
 

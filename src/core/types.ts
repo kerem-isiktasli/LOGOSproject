@@ -1282,3 +1282,1232 @@ export interface DateRange {
   /** End date (inclusive) */
   to: Date;
 }
+
+// =============================================================================
+// Multi-Component Calibration Types (MIRT/CDM Framework)
+// =============================================================================
+
+/**
+ * Component type codes for Q-matrix mapping.
+ * Based on LOGOS 5-component linguistic model.
+ */
+export type ComponentCode = 'PHON' | 'MORPH' | 'LEX' | 'SYNT' | 'PRAG';
+
+/**
+ * Cognitive process required by a task.
+ * Maps to different processing depths and skill requirements.
+ */
+export type CognitiveProcess =
+  | 'recognition'      // Identify among options (lowest load)
+  | 'recall'           // Retrieve from memory
+  | 'transformation'   // Apply morphological/syntactic rules
+  | 'production'       // Generate novel output
+  | 'analysis'         // Decompose and evaluate
+  | 'synthesis';       // Combine multiple elements (highest load)
+
+/**
+ * Target object in a multi-object task.
+ * Represents one component-object being measured/trained.
+ *
+ * Based on Q-matrix cognitive diagnostic model (de la Torre, 2011)
+ * and Within-Item MIRT (Hartig & Höhler, 2008).
+ */
+export interface MultiObjectTarget {
+  /** Language object ID */
+  objectId: string;
+
+  /** Component type this object belongs to */
+  componentType: ComponentCode;
+
+  /** Object content (word, pattern, rule) */
+  content: string;
+
+  /**
+   * Contribution weight (0-1).
+   * Sum of all weights in a task should equal 1.
+   * Higher weight = more theta contribution from this object.
+   *
+   * Based on G-DINA attribute contribution (de la Torre, 2011).
+   */
+  weight: number;
+
+  /**
+   * Whether this is a primary design-purpose object.
+   * Primary objects are the main learning targets.
+   * Secondary objects provide context or incidental practice.
+   */
+  isPrimaryTarget: boolean;
+
+  /**
+   * Cognitive process required for this object in the task.
+   * Different processes have different difficulty multipliers.
+   */
+  cognitiveProcess: CognitiveProcess;
+
+  /**
+   * Item difficulty for this specific object (IRT b parameter).
+   * Used in compensatory MIRT probability calculation.
+   */
+  difficulty: number;
+
+  /**
+   * Item discrimination for this object (IRT a parameter).
+   * Higher = more sensitive to ability differences.
+   */
+  discrimination: number;
+}
+
+/**
+ * Multi-object task specification.
+ * Extends TaskSpec to support multiple target objects.
+ *
+ * Implements Within-Item Multidimensional IRT structure.
+ */
+export interface MultiObjectTaskSpec {
+  /** Unique task ID */
+  taskId: string;
+
+  /** Session ID */
+  sessionId: string;
+
+  /** Goal ID for context */
+  goalId: string;
+
+  /**
+   * Target objects with Q-matrix weights.
+   * Order: primary targets first, then secondary.
+   */
+  targetObjects: MultiObjectTarget[];
+
+  /** Task type */
+  taskType: TaskType;
+
+  /** Task format */
+  taskFormat: TaskFormat;
+
+  /** Input/output modality */
+  modality: TaskModality;
+
+  /** Domain context */
+  domain: string;
+
+  /**
+   * Overall task difficulty (composite).
+   * Calculated from weighted object difficulties.
+   */
+  compositeDifficulty: number;
+
+  /**
+   * Whether this is a fluency-focused task.
+   * Fluency tasks have time pressure and lower cognitive load.
+   */
+  isFluencyTask: boolean;
+
+  /** Expected correct answer */
+  expectedAnswer: string;
+
+  /** Alternative acceptable answers */
+  alternativeAnswers?: string[];
+}
+
+/**
+ * Component-level evaluation result.
+ * Tracks correctness at each component granularity.
+ */
+export interface ComponentEvaluation {
+  /** Object ID evaluated */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Whether this component aspect was correct */
+  correct: boolean;
+
+  /**
+   * Partial credit (0-1).
+   * Allows nuanced scoring for partially correct responses.
+   */
+  partialCredit: number;
+
+  /**
+   * Error type if incorrect.
+   * Used for error pattern analysis and targeted feedback.
+   */
+  errorType?: 'omission' | 'substitution' | 'addition' | 'ordering' | 'form' | 'usage';
+
+  /**
+   * Specific feedback for this component.
+   * E.g., "Good vocabulary choice, but check the verb form."
+   */
+  feedback: string;
+
+  /** Correction hint if incorrect */
+  correction?: string;
+}
+
+/**
+ * Multi-component evaluation result.
+ * Aggregates evaluations across all target objects.
+ */
+export interface MultiComponentEvaluation {
+  /** Overall correctness (all components correct) */
+  overallCorrect: boolean;
+
+  /**
+   * Weighted composite score (0-1).
+   * Σ(weight_i × partialCredit_i)
+   */
+  compositeScore: number;
+
+  /** Per-component evaluations */
+  componentEvaluations: ComponentEvaluation[];
+
+  /** Aggregated feedback message */
+  feedback: string;
+
+  /** Detailed explanation */
+  explanation?: string;
+}
+
+/**
+ * Theta contribution for multi-component update.
+ * Based on Compensatory MIRT model:
+ * P(correct|θ) = σ(Σ aᵢθᵢ + d)
+ */
+export interface MultiComponentThetaContribution {
+  /** Component type */
+  componentType: ComponentCode;
+
+  /**
+   * Theta delta for this component.
+   * Calculated as: K × wᵢ × (observed - expected) × boundaryDecay
+   */
+  thetaDelta: number;
+
+  /** Weight used in calculation */
+  weight: number;
+
+  /** Object ID this contribution came from */
+  sourceObjectId: string;
+}
+
+/**
+ * Complete multi-object response outcome.
+ * Comprehensive result of processing a multi-object task response.
+ */
+export interface MultiObjectResponseOutcome {
+  /** Response record ID */
+  responseId: string;
+
+  /** Multi-component evaluation */
+  evaluation: MultiComponentEvaluation;
+
+  /** Per-component theta contributions */
+  thetaContributions: MultiComponentThetaContribution[];
+
+  /** Aggregated theta state change */
+  aggregatedThetaChange: Partial<UserThetaProfile>;
+
+  /** Per-object mastery updates */
+  masteryUpdates: Array<{
+    objectId: string;
+    componentType: ComponentCode;
+    previousStage: MasteryStage;
+    newStage: MasteryStage;
+    stageChanged: boolean;
+    newAccuracy: number;
+  }>;
+
+  /** Per-object priority updates */
+  priorityUpdates: Array<{
+    objectId: string;
+    previousPriority: number;
+    newPriority: number;
+  }>;
+
+  /** FSRS updates for review scheduling */
+  fsrsUpdates?: Array<{
+    objectId: string;
+    nextReview: Date;
+    stability: number;
+    difficulty: number;
+  }>;
+}
+
+/**
+ * Q-matrix entry for cognitive diagnostic modeling.
+ * Maps task types to required component attributes.
+ *
+ * Based on G-DINA framework (de la Torre, 2011).
+ */
+export interface QMatrixEntry {
+  /** Task type */
+  taskType: TaskType;
+
+  /**
+   * Required components with default weights.
+   * Weight indicates relative importance of each component.
+   */
+  components: Partial<Record<ComponentCode, number>>;
+
+  /**
+   * Interaction model type.
+   * - 'compensatory': High ability in one can compensate for low in another
+   * - 'conjunctive': Must have all required abilities (DINA-like)
+   * - 'disjunctive': Any one ability sufficient (DINO-like)
+   */
+  interactionModel: 'compensatory' | 'conjunctive' | 'disjunctive';
+
+  /** Primary cognitive process */
+  primaryProcess: CognitiveProcess;
+}
+
+/**
+ * Default Q-matrix for task-component mapping.
+ * Provides baseline weights when not explicitly specified.
+ */
+export const DEFAULT_Q_MATRIX: Record<string, QMatrixEntry> = {
+  recognition: {
+    taskType: 'recognition',
+    components: { LEX: 0.7, PHON: 0.2, MORPH: 0.1 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'recognition',
+  },
+  recall_cued: {
+    taskType: 'recall_cued',
+    components: { LEX: 0.6, MORPH: 0.2, PHON: 0.2 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'recall',
+  },
+  recall_free: {
+    taskType: 'recall_free',
+    components: { LEX: 0.5, MORPH: 0.25, PHON: 0.25 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'recall',
+  },
+  production: {
+    taskType: 'production',
+    components: { LEX: 0.3, SYNT: 0.3, PRAG: 0.2, MORPH: 0.2 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'production',
+  },
+  word_formation: {
+    taskType: 'word_formation',
+    components: { MORPH: 0.6, LEX: 0.3, PHON: 0.1 },
+    interactionModel: 'conjunctive',
+    primaryProcess: 'transformation',
+  },
+  collocation: {
+    taskType: 'collocation',
+    components: { LEX: 0.5, SYNT: 0.3, PRAG: 0.2 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'recall',
+  },
+  sentence_combining: {
+    taskType: 'sentence_combining',
+    components: { SYNT: 0.6, LEX: 0.2, PRAG: 0.2 },
+    interactionModel: 'conjunctive',
+    primaryProcess: 'synthesis',
+  },
+  register_shift: {
+    taskType: 'register_shift',
+    components: { PRAG: 0.5, LEX: 0.3, SYNT: 0.2 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'transformation',
+  },
+  error_correction: {
+    taskType: 'error_correction',
+    components: { SYNT: 0.4, MORPH: 0.3, LEX: 0.2, PHON: 0.1 },
+    interactionModel: 'disjunctive',
+    primaryProcess: 'analysis',
+  },
+  translation: {
+    taskType: 'translation',
+    components: { LEX: 0.4, SYNT: 0.3, PRAG: 0.2, MORPH: 0.1 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'production',
+  },
+  sentence_writing: {
+    taskType: 'sentence_writing',
+    components: { SYNT: 0.35, LEX: 0.3, PRAG: 0.2, MORPH: 0.15 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'synthesis',
+  },
+  rapid_response: {
+    taskType: 'rapid_response',
+    components: { LEX: 0.6, PHON: 0.3, MORPH: 0.1 },
+    interactionModel: 'compensatory',
+    primaryProcess: 'recognition',
+  },
+};
+
+/**
+ * Cognitive process difficulty multipliers.
+ * Higher processes require more cognitive resources.
+ * Based on Bloom's taxonomy and Anderson & Krathwohl (2001).
+ */
+export const COGNITIVE_PROCESS_MULTIPLIERS: Record<CognitiveProcess, number> = {
+  recognition: 1.0,      // Base difficulty
+  recall: 1.2,           // 20% harder
+  transformation: 1.4,   // 40% harder
+  production: 1.6,       // 60% harder
+  analysis: 1.5,         // 50% harder
+  synthesis: 1.8,        // 80% harder (highest)
+};
+
+// =============================================================================
+// Flexible Object-Role Allocation Framework
+// =============================================================================
+
+/**
+ * Object role in a task - continuous spectrum, not binary.
+ *
+ * Roles determine:
+ * - How much theta update the object receives
+ * - What kind of evaluation is applied
+ * - How the object's state is updated after the task
+ *
+ * This replaces the binary isPrimaryTarget with a gradient model.
+ */
+export type ObjectRole =
+  | 'assessment'      // Full evaluation, full theta/mastery update
+  | 'practice'        // Evaluation tracked, partial theta update
+  | 'reinforcement'   // Light check, exposure-focused, minimal theta
+  | 'incidental';     // No evaluation, exposure count only
+
+/**
+ * Role configuration parameters.
+ * Defines how each role affects learning metrics.
+ */
+export interface RoleConfig {
+  /** Theta update multiplier (0-1) */
+  thetaMultiplier: number;
+
+  /** Whether to update mastery state */
+  updateMastery: boolean;
+
+  /** Whether to track accuracy */
+  trackAccuracy: boolean;
+
+  /** Whether to update FSRS scheduling */
+  updateFSRS: boolean;
+
+  /** Exposure weight for this role */
+  exposureWeight: number;
+
+  /** Minimum cognitive engagement required */
+  minEngagement: 'passive' | 'recognition' | 'recall' | 'production';
+}
+
+/**
+ * Default configurations for each object role.
+ */
+export const ROLE_CONFIGS: Record<ObjectRole, RoleConfig> = {
+  assessment: {
+    thetaMultiplier: 1.0,
+    updateMastery: true,
+    trackAccuracy: true,
+    updateFSRS: true,
+    exposureWeight: 1.0,
+    minEngagement: 'recall',
+  },
+  practice: {
+    thetaMultiplier: 0.5,
+    updateMastery: true,
+    trackAccuracy: true,
+    updateFSRS: true,
+    exposureWeight: 0.8,
+    minEngagement: 'recognition',
+  },
+  reinforcement: {
+    thetaMultiplier: 0.2,
+    updateMastery: false,
+    trackAccuracy: false,
+    updateFSRS: false,
+    exposureWeight: 0.5,
+    minEngagement: 'recognition',
+  },
+  incidental: {
+    thetaMultiplier: 0,
+    updateMastery: false,
+    trackAccuracy: false,
+    updateFSRS: false,
+    exposureWeight: 0.3,
+    minEngagement: 'passive',
+  },
+};
+
+/**
+ * Object slot in a task template.
+ * Defines a position where any qualifying object can be placed.
+ *
+ * This enables flexible task composition - the task generator
+ * can fill slots with objects based on user state optimization.
+ */
+export interface ObjectSlot {
+  /** Unique slot identifier within the task */
+  slotId: string;
+
+  /** Acceptable component types for this slot */
+  acceptedComponents: ComponentCode[];
+
+  /** Role this slot assigns to its object */
+  role: ObjectRole;
+
+  /** Weight contribution to task (0-1) */
+  weight: number;
+
+  /** Required cognitive process for this slot */
+  requiredProcess: CognitiveProcess;
+
+  /** Constraints on object selection */
+  constraints?: ObjectSlotConstraints;
+
+  /** Whether this slot must be filled */
+  required: boolean;
+}
+
+/**
+ * Constraints for object slot filling.
+ * Allows expressing complex selection criteria.
+ */
+export interface ObjectSlotConstraints {
+  /** Minimum mastery stage required */
+  minMasteryStage?: MasteryStage;
+
+  /** Maximum mastery stage allowed */
+  maxMasteryStage?: MasteryStage;
+
+  /** Minimum automaticity level (0-1) */
+  minAutomaticity?: number;
+
+  /** Required relationship to another slot's object */
+  relatedToSlot?: {
+    slotId: string;
+    relationshipType: 'collocation' | 'morphological_family' | 'semantic_field' | 'syntactic_pattern';
+  };
+
+  /** Domain filter */
+  domains?: string[];
+
+  /** Recency constraint - exclude if seen within N sessions */
+  minSessionsSinceExposure?: number;
+
+  /** Priority threshold */
+  minPriority?: number;
+}
+
+/**
+ * Task template with flexible object slots.
+ * Separates task structure from specific object assignment.
+ */
+export interface TaskTemplate {
+  /** Template identifier */
+  templateId: string;
+
+  /** Human-readable name */
+  name: string;
+
+  /** Task type this template produces */
+  taskType: TaskType;
+
+  /** Task format */
+  taskFormat: TaskFormat;
+
+  /** Supported modalities */
+  modalities: TaskModality[];
+
+  /** Object slots to be filled */
+  slots: ObjectSlot[];
+
+  /** Interaction model for multi-component scoring */
+  interactionModel: 'compensatory' | 'conjunctive' | 'disjunctive';
+
+  /** Base difficulty before object adjustments */
+  baseDifficulty: number;
+
+  /** Content generation template/prompt */
+  contentTemplate: string;
+
+  /** Minimum total weight from assessment+practice roles */
+  minEvaluatedWeight: number;
+}
+
+/**
+ * Filled slot - a slot with an assigned object.
+ */
+export interface FilledSlot extends ObjectSlot {
+  /** Assigned object ID */
+  objectId: string;
+
+  /** Object content */
+  content: string;
+
+  /** Object's IRT difficulty */
+  objectDifficulty: number;
+
+  /** Object's IRT discrimination */
+  objectDiscrimination: number;
+
+  /** Object's current mastery stage */
+  currentMasteryStage: MasteryStage;
+
+  /** Object's automaticity level (0-1) */
+  automaticityLevel: number;
+}
+
+/**
+ * Composed task - a template with all slots filled.
+ */
+export interface ComposedTask {
+  /** Unique task ID */
+  taskId: string;
+
+  /** Source template */
+  templateId: string;
+
+  /** Session context */
+  sessionId: string;
+
+  /** Goal context */
+  goalId: string;
+
+  /** Filled slots */
+  filledSlots: FilledSlot[];
+
+  /** Task type */
+  taskType: TaskType;
+
+  /** Task format */
+  taskFormat: TaskFormat;
+
+  /** Modality */
+  modality: TaskModality;
+
+  /** Domain */
+  domain: string;
+
+  /** Composite difficulty (weighted from slots) */
+  compositeDifficulty: number;
+
+  /** Generated content/prompt */
+  content: string;
+
+  /** Expected answer(s) */
+  expectedAnswers: string[];
+
+  /** Evaluation rubric */
+  rubric: TaskRubric;
+}
+
+/**
+ * Evaluation rubric for multi-slot tasks.
+ */
+export interface TaskRubric {
+  /** Per-slot evaluation criteria */
+  slotCriteria: Array<{
+    slotId: string;
+    criteria: string;
+    partialCreditLevels?: Array<{
+      score: number;
+      description: string;
+    }>;
+  }>;
+
+  /** Overall task success criteria */
+  overallCriteria: string;
+
+  /** Acceptable answer patterns */
+  acceptablePatterns?: RegExp[];
+}
+
+/**
+ * Economic value of including an object in a task.
+ * Used by the optimizer to select optimal object combinations.
+ */
+export interface ObjectEconomicValue {
+  /** Object ID */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /**
+   * Learning value - how much including this object advances learning goals.
+   * Higher for objects that need practice, are due for review, or are high priority.
+   */
+  learningValue: number;
+
+  /**
+   * Cognitive cost - how much mental load this object adds.
+   * Higher for difficult objects, unfamiliar objects, or complex processes.
+   */
+  cognitiveCost: number;
+
+  /**
+   * Synergy potential - bonus value when combined with specific other objects.
+   * E.g., collocations, morphological families, related concepts.
+   */
+  synergyMap: Map<string, number>;
+
+  /**
+   * Role affinity - how suitable this object is for each role.
+   * Based on mastery stage, automaticity, learning needs.
+   */
+  roleAffinity: Record<ObjectRole, number>;
+
+  /**
+   * Urgency - time-sensitive priority.
+   * Due reviews, approaching deadlines, skill decay risk.
+   */
+  urgency: number;
+
+  /**
+   * Exposure balance - adjustment based on modality exposure history.
+   * Favors objects that need more balanced exposure.
+   */
+  exposureBalance: number;
+}
+
+/**
+ * Task composition optimization parameters.
+ */
+export interface CompositionOptimizationConfig {
+  /** Maximum cognitive load allowed */
+  maxCognitiveLoad: number;
+
+  /** Minimum learning value threshold */
+  minLearningValue: number;
+
+  /** How much to weight synergy in selection */
+  synergyWeight: number;
+
+  /** How much to weight urgency in selection */
+  urgencyWeight: number;
+
+  /** How much to weight exposure balance */
+  exposureBalanceWeight: number;
+
+  /** Prefer fewer high-value objects vs more low-value objects */
+  densityPreference: 'sparse' | 'balanced' | 'dense';
+
+  /** Maximum objects per task */
+  maxObjectsPerTask: number;
+
+  /** Minimum objects per task */
+  minObjectsPerTask: number;
+}
+
+/**
+ * Default optimization configuration.
+ */
+export const DEFAULT_COMPOSITION_CONFIG: CompositionOptimizationConfig = {
+  maxCognitiveLoad: 7,  // Miller's 7±2
+  minLearningValue: 0.1,
+  synergyWeight: 0.3,
+  urgencyWeight: 0.4,
+  exposureBalanceWeight: 0.2,
+  densityPreference: 'balanced',
+  maxObjectsPerTask: 8,
+  minObjectsPerTask: 1,
+};
+
+/**
+ * Result of task composition optimization.
+ */
+export interface CompositionResult {
+  /** The composed task */
+  task: ComposedTask;
+
+  /** Total learning value achieved */
+  totalLearningValue: number;
+
+  /** Total cognitive cost */
+  totalCognitiveCost: number;
+
+  /** Efficiency ratio (value / cost) */
+  efficiency: number;
+
+  /** Synergy bonus captured */
+  synergyBonus: number;
+
+  /** Objects considered but not included */
+  excludedObjects: Array<{
+    objectId: string;
+    reason: 'cognitive_overload' | 'low_value' | 'constraint_mismatch' | 'slot_full';
+  }>;
+
+  /** Alternative compositions considered (for debugging/explanation) */
+  alternativesConsidered?: number;
+}
+
+// =============================================================================
+// Cascading Constraint & Evaluation System
+// =============================================================================
+
+/**
+ * Object evaluation mode - how correctness is determined.
+ * Different objects require different evaluation approaches.
+ */
+export type EvaluationMode =
+  | 'binary'           // Simple correct/incorrect
+  | 'partial_credit'   // Multi-layer scoring
+  | 'range_based'      // Acceptable answer range
+  | 'rubric_based';    // Complex rubric with criteria
+
+/**
+ * Evaluation layer for partial credit scoring.
+ * Each layer represents a different aspect of correctness.
+ */
+export interface EvaluationLayer {
+  /** Layer identifier */
+  layerId: string;
+
+  /** Layer name (e.g., "Form Accuracy", "Contextual Appropriateness") */
+  name: string;
+
+  /** Weight of this layer in final score (0-1) */
+  weight: number;
+
+  /** Criteria for full credit */
+  fullCreditCriteria: string;
+
+  /** Partial credit levels */
+  levels: Array<{
+    score: number;        // 0-1
+    description: string;  // What earns this score
+    examples?: string[];  // Example responses at this level
+  }>;
+}
+
+/**
+ * Range-based answer specification.
+ * For objects where multiple answers are acceptable.
+ */
+export interface AnswerRange {
+  /** Exact matches (highest score) */
+  exactMatches: string[];
+
+  /** Acceptable variants (full credit but not exact) */
+  acceptableVariants: string[];
+
+  /** Partial credit patterns */
+  partialCreditPatterns: Array<{
+    pattern: string;      // Regex or template
+    score: number;        // 0-1
+    feedback: string;     // Why partial credit
+  }>;
+
+  /** Semantic similarity threshold (0-1) for fuzzy matching */
+  semanticThreshold?: number;
+}
+
+/**
+ * Object-specific evaluation configuration.
+ * Defines how each object's correctness is assessed.
+ */
+export interface ObjectEvaluationConfig {
+  /** Object ID this config applies to */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Primary evaluation mode */
+  evaluationMode: EvaluationMode;
+
+  /** For partial_credit mode: evaluation layers */
+  layers?: EvaluationLayer[];
+
+  /** For range_based mode: acceptable answer range */
+  answerRange?: AnswerRange;
+
+  /** For rubric_based mode: full rubric */
+  rubric?: ObjectRubric;
+
+  /** Context-dependent evaluation adjustments */
+  contextAdjustments?: Array<{
+    context: string;      // Context identifier
+    adjustment: number;   // Score multiplier
+    reason: string;       // Why adjustment applies
+  }>;
+}
+
+/**
+ * Object-specific rubric for complex evaluation.
+ */
+export interface ObjectRubric {
+  /** Rubric identifier */
+  rubricId: string;
+
+  /** Criteria to evaluate */
+  criteria: Array<{
+    criterionId: string;
+    name: string;
+    description: string;
+    weight: number;
+    scoringGuide: Array<{
+      score: number;
+      descriptor: string;
+    }>;
+  }>;
+
+  /** Holistic scoring option */
+  holisticOption?: {
+    enabled: boolean;
+    levels: Array<{
+      score: number;
+      descriptor: string;
+    }>;
+  };
+}
+
+// =============================================================================
+// Cascading Constraint Graph
+// =============================================================================
+
+/**
+ * Constraint relationship types between objects.
+ * Defines how selecting one object affects others.
+ */
+export type ConstraintType =
+  | 'requires'          // Must also include this object
+  | 'excludes'          // Cannot include this object
+  | 'prefers'           // Bonus if included together
+  | 'restricts_to'      // Limits choices to subset
+  | 'enables'           // Makes object available for selection
+  | 'modifies';         // Changes object's properties when combined
+
+/**
+ * Single constraint edge in the constraint graph.
+ */
+export interface ConstraintEdge {
+  /** Source object/slot triggering the constraint */
+  sourceId: string;
+
+  /** Target object/slot/set affected */
+  targetId: string;
+
+  /** Constraint type */
+  type: ConstraintType;
+
+  /** Constraint strength (0-1, for soft constraints) */
+  strength: number;
+
+  /** Condition for constraint activation */
+  condition?: ConstraintCondition;
+
+  /** Modification details (for 'modifies' type) */
+  modification?: {
+    property: string;
+    newValue: unknown;
+    reason: string;
+  };
+}
+
+/**
+ * Condition for constraint activation.
+ */
+export interface ConstraintCondition {
+  /** Property to check */
+  property: 'componentType' | 'masteryStage' | 'content' | 'role' | 'taskType';
+
+  /** Operator */
+  operator: 'equals' | 'not_equals' | 'in' | 'not_in' | 'greater_than' | 'less_than';
+
+  /** Value to compare against */
+  value: unknown;
+}
+
+/**
+ * Constraint propagation result.
+ * Shows how constraints cascade through object selection.
+ */
+export interface ConstraintPropagation {
+  /** Initial selection that triggered propagation */
+  trigger: {
+    slotId: string;
+    objectId: string;
+  };
+
+  /** Required objects (must select) */
+  required: Array<{
+    objectId: string;
+    reason: string;
+    fromConstraint: string;
+  }>;
+
+  /** Excluded objects (cannot select) */
+  excluded: Array<{
+    objectId: string;
+    reason: string;
+    fromConstraint: string;
+  }>;
+
+  /** Restricted pools (limited choices) */
+  restrictions: Array<{
+    slotId: string;
+    allowedObjectIds: string[];
+    reason: string;
+  }>;
+
+  /** Preference adjustments */
+  preferences: Array<{
+    objectId: string;
+    adjustment: number;  // Additive to economic value
+    reason: string;
+  }>;
+
+  /** Property modifications */
+  modifications: Array<{
+    objectId: string;
+    property: string;
+    originalValue: unknown;
+    newValue: unknown;
+    reason: string;
+  }>;
+}
+
+/**
+ * Linguistic constraint rules.
+ * Pre-defined constraints based on linguistic relationships.
+ */
+export interface LinguisticConstraintRule {
+  /** Rule identifier */
+  ruleId: string;
+
+  /** Rule name */
+  name: string;
+
+  /** Description */
+  description: string;
+
+  /** Source component type */
+  sourceComponent: ComponentCode;
+
+  /** Target component type */
+  targetComponent: ComponentCode;
+
+  /** Constraint type */
+  constraintType: ConstraintType;
+
+  /** Rule logic (predicate function signature) */
+  predicateType: 'syntactic_agreement' | 'phonological_compatibility' |
+                 'morphological_derivation' | 'collocation' |
+                 'register_consistency' | 'semantic_coherence';
+
+  /** Default strength */
+  defaultStrength: number;
+}
+
+/**
+ * Pre-defined linguistic constraint rules.
+ */
+export const LINGUISTIC_CONSTRAINT_RULES: LinguisticConstraintRule[] = [
+  // Syntax → Morphology: verb form agreement
+  {
+    ruleId: 'synt-morph-verb-agreement',
+    name: 'Verb Form Agreement',
+    description: 'Syntactic structure requires specific morphological form',
+    sourceComponent: 'SYNT',
+    targetComponent: 'MORPH',
+    constraintType: 'restricts_to',
+    predicateType: 'syntactic_agreement',
+    defaultStrength: 1.0,
+  },
+  // Syntax → Lexicon: transitivity requirement
+  {
+    ruleId: 'synt-lex-transitivity',
+    name: 'Transitivity Requirement',
+    description: 'Syntactic pattern requires transitive/intransitive verb',
+    sourceComponent: 'SYNT',
+    targetComponent: 'LEX',
+    constraintType: 'restricts_to',
+    predicateType: 'syntactic_agreement',
+    defaultStrength: 1.0,
+  },
+  // Lexicon → Lexicon: collocation preference
+  {
+    ruleId: 'lex-lex-collocation',
+    name: 'Collocation Preference',
+    description: 'Words that frequently co-occur',
+    sourceComponent: 'LEX',
+    targetComponent: 'LEX',
+    constraintType: 'prefers',
+    predicateType: 'collocation',
+    defaultStrength: 0.7,
+  },
+  // Lexicon → Phonology: G2P mapping
+  {
+    ruleId: 'lex-phon-g2p',
+    name: 'Grapheme-Phoneme Mapping',
+    description: 'Word requires specific pronunciation pattern',
+    sourceComponent: 'LEX',
+    targetComponent: 'PHON',
+    constraintType: 'requires',
+    predicateType: 'phonological_compatibility',
+    defaultStrength: 1.0,
+  },
+  // Lexicon → Morphology: derivational family
+  {
+    ruleId: 'lex-morph-derivation',
+    name: 'Morphological Family',
+    description: 'Words sharing morphological derivation',
+    sourceComponent: 'LEX',
+    targetComponent: 'MORPH',
+    constraintType: 'enables',
+    predicateType: 'morphological_derivation',
+    defaultStrength: 0.8,
+  },
+  // Pragmatics → Lexicon: register consistency
+  {
+    ruleId: 'prag-lex-register',
+    name: 'Register Consistency',
+    description: 'Pragmatic context requires appropriate register vocabulary',
+    sourceComponent: 'PRAG',
+    targetComponent: 'LEX',
+    constraintType: 'restricts_to',
+    predicateType: 'register_consistency',
+    defaultStrength: 0.9,
+  },
+  // Pragmatics → Syntax: discourse structure
+  {
+    ruleId: 'prag-synt-discourse',
+    name: 'Discourse Structure',
+    description: 'Pragmatic function suggests syntactic patterns',
+    sourceComponent: 'PRAG',
+    targetComponent: 'SYNT',
+    constraintType: 'prefers',
+    predicateType: 'semantic_coherence',
+    defaultStrength: 0.6,
+  },
+];
+
+// =============================================================================
+// Usage Space Tracking
+// =============================================================================
+
+/**
+ * Usage context - a specific situation where an object can be used.
+ */
+export interface UsageContext {
+  /** Context identifier */
+  contextId: string;
+
+  /** Context name */
+  name: string;
+
+  /** Domain (medical, legal, general, etc.) */
+  domain: string;
+
+  /** Register (formal, informal, technical, etc.) */
+  register: string;
+
+  /** Modality (spoken, written, etc.) */
+  modality: 'spoken' | 'written' | 'both';
+
+  /** Genre (email, report, conversation, etc.) */
+  genre?: string;
+
+  /** Task types where this context applies */
+  applicableTaskTypes: TaskType[];
+}
+
+/**
+ * Object usage space - tracked contexts where object has been used.
+ */
+export interface ObjectUsageSpace {
+  /** Object ID */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Contexts where object has been successfully used */
+  successfulContexts: Array<{
+    contextId: string;
+    exposureCount: number;
+    successRate: number;
+    lastExposure: Date;
+  }>;
+
+  /** Contexts attempted but not yet mastered */
+  attemptedContexts: Array<{
+    contextId: string;
+    exposureCount: number;
+    successRate: number;
+    lastExposure: Date;
+  }>;
+
+  /** Target contexts for this object (from goal) */
+  targetContexts: string[];
+
+  /** Coverage ratio (successful / target) */
+  coverageRatio: number;
+
+  /** Expansion readiness - which new contexts could be attempted */
+  expansionCandidates: Array<{
+    contextId: string;
+    readinessScore: number;  // 0-1, based on related context mastery
+    prerequisites: string[]; // Contexts that should be mastered first
+  }>;
+}
+
+/**
+ * Usage space expansion event.
+ * Recorded when an object is successfully used in a new context.
+ */
+export interface UsageSpaceExpansion {
+  /** Object ID */
+  objectId: string;
+
+  /** New context ID */
+  newContextId: string;
+
+  /** Session where expansion occurred */
+  sessionId: string;
+
+  /** Task that triggered expansion */
+  taskId: string;
+
+  /** Timestamp */
+  timestamp: Date;
+
+  /** Previous coverage ratio */
+  previousCoverage: number;
+
+  /** New coverage ratio */
+  newCoverage: number;
+}
+
+/**
+ * Goal progress based on usage space coverage.
+ */
+export interface UsageSpaceProgress {
+  /** Goal ID */
+  goalId: string;
+
+  /** Per-component coverage */
+  componentCoverage: Record<ComponentCode, {
+    totalObjects: number;
+    objectsWithFullCoverage: number;
+    averageCoverage: number;
+    criticalGaps: Array<{
+      objectId: string;
+      missingContexts: string[];
+    }>;
+  }>;
+
+  /** Overall readiness estimate */
+  overallReadiness: number;
+
+  /** Recommended focus areas */
+  recommendations: Array<{
+    priority: number;
+    componentType: ComponentCode;
+    objectIds: string[];
+    targetContexts: string[];
+    reason: string;
+  }>;
+}

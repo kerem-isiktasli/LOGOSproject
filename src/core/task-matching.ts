@@ -371,6 +371,7 @@ function generateRecommendationReason(
     morphological: 'complex word family',
     phonological: 'challenging pronunciation',
     pragmatic: 'context-sensitive',
+    syntactic: 'syntactically complex',
   };
 
   const taskLabels: Partial<Record<TaskType, string>> = {

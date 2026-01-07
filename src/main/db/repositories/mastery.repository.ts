@@ -260,7 +260,7 @@ export async function bulkCreateMasteryStates(
       fsrsDifficulty: 5,
       fsrsStability: 0,
     })),
-    skipDuplicates: true,
+    
   });
 
   return result.count;

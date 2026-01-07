@@ -7,7 +7,8 @@
 
 import { registerDynamicHandler, success, error } from './contracts';
 import { prisma } from '../db/client';
-import { populateVocabularyForGoal } from '../services/corpus-sources/corpus-pipeline.service';
+import { populateVocabularyForGoal, generateMultiComponentObjects } from '../services/corpus-sources/corpus-pipeline.service';
+import { estimateInitialTheta } from '../services/diagnostic-assessment.service';
 
 // =============================================================================
 // Types
@@ -77,6 +78,16 @@ export function registerOnboardingHandlers(): void {
     if (!data.nativeLanguage || !data.targetLanguage) {
       return error('Native and target languages are required');
     }
+
+    // Validate language codes (BCP-47 format: xx or xx-XX)
+    const languageCodePattern = /^[a-z]{2}(-[A-Z]{2})?$/;
+    if (!languageCodePattern.test(data.nativeLanguage)) {
+      return error(`Invalid native language code: ${data.nativeLanguage}. Expected format: 'en' or 'en-US'`);
+    }
+    if (!languageCodePattern.test(data.targetLanguage)) {
+      return error(`Invalid target language code: ${data.targetLanguage}. Expected format: 'ko' or 'ko-KR'`);
+    }
+
     if (!data.domain) {
       return error('Domain is required');
     }
@@ -88,30 +99,45 @@ export function registerOnboardingHandlers(): void {
     }
 
     try {
-      // Create or update user with language preferences
+      // Estimate initial theta values based on user profile
+      // Reference: IRT (Item Response Theory) - prior estimation
+      const thetaEstimate = estimateInitialTheta({
+        purpose: data.purpose,
+        dailyTime: data.dailyTime,
+        domain: data.domain,
+        modality: data.modality,
+      });
+
+      // Create or update user with language preferences and estimated theta
       let user = await prisma.user.findFirst();
 
       if (user) {
-        // Update existing user
+        // Update existing user with new theta estimates
         user = await prisma.user.update({
           where: { id: user.id },
           data: {
             nativeLanguage: data.nativeLanguage,
             targetLanguage: data.targetLanguage,
+            thetaGlobal: thetaEstimate.thetaGlobal,
+            thetaPhonology: thetaEstimate.thetaPhonology,
+            thetaMorphology: thetaEstimate.thetaMorphology,
+            thetaLexical: thetaEstimate.thetaLexical,
+            thetaSyntactic: thetaEstimate.thetaSyntactic,
+            thetaPragmatic: thetaEstimate.thetaPragmatic,
           },
         });
       } else {
-        // Create new user
+        // Create new user with estimated theta values
         user = await prisma.user.create({
           data: {
             nativeLanguage: data.nativeLanguage,
             targetLanguage: data.targetLanguage,
-            thetaGlobal: 0,
-            thetaPhonology: 0,
-            thetaMorphology: 0,
-            thetaLexical: 0,
-            thetaSyntactic: 0,
-            thetaPragmatic: 0,
+            thetaGlobal: thetaEstimate.thetaGlobal,
+            thetaPhonology: thetaEstimate.thetaPhonology,
+            thetaMorphology: thetaEstimate.thetaMorphology,
+            thetaLexical: thetaEstimate.thetaLexical,
+            thetaSyntactic: thetaEstimate.thetaSyntactic,
+            thetaPragmatic: thetaEstimate.thetaPragmatic,
           },
         });
       }
@@ -131,12 +157,39 @@ export function registerOnboardingHandlers(): void {
         },
       });
 
-      // Start vocabulary population in background
-      // Don't await - let it run asynchronously
-      populateVocabularyForGoal(goal.id, {
-        targetVocabSize: getInitialVocabSize(data.dailyTime, data.purpose),
+      // Populate minimum vocabulary synchronously (wait for at least 20 items)
+      // This ensures first session has content to work with
+      const minVocabSize = 20;
+      let initialVocabCount = 0;
+
+      try {
+        const result = await populateVocabularyForGoal(goal.id, {
+          targetVocabSize: minVocabSize,
+          maxSources: 2, // Limit sources for faster initial load
+        });
+        initialVocabCount = result.vocabularyCount;
+      } catch (err) {
+        console.error('Initial vocabulary population failed:', err);
+        // Continue anyway - user can retry later
+      }
+
+      // Continue populating vocabulary in background for remaining items
+      const totalTargetSize = getInitialVocabSize(data.dailyTime, data.purpose);
+      if (initialVocabCount < totalTargetSize) {
+        populateVocabularyForGoal(goal.id, {
+          targetVocabSize: totalTargetSize - initialVocabCount,
+        }).catch((err) => {
+          console.error('Background vocabulary population failed:', err);
+        });
+      }
+
+      // Generate multi-component objects (MORPH, G2P, SYNT, PRAG) in background
+      // Reference: Nation (2001), Bauer & Nation (1993), Lu L2SCA (2010), Taguchi (2015)
+      generateMultiComponentObjects(goal.id, {
+        nativeLanguage: data.nativeLanguage,
+        maxPerType: 30,
       }).catch((err) => {
-        console.error('Background vocabulary population failed:', err);
+        console.error('Multi-component object generation failed:', err);
       });
 
       return success({
@@ -147,6 +200,9 @@ export function registerOnboardingHandlers(): void {
         domain: goal.domain,
         modality: data.modality,
         purpose: goal.purpose,
+        initialVocabCount,
+        estimatedCEFR: thetaEstimate.estimatedCEFR,
+        initialTheta: thetaEstimate.thetaGlobal,
       });
     } catch (err) {
       console.error('Failed to complete onboarding:', err);

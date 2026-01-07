@@ -16,7 +16,7 @@ import {
   calculateFSRSRatingWithTiming,
   getTaskCategory,
 } from '../../core/response-timing';
-import type { ResponseData } from '../../core/fsrs';
+import type { FSRSResponseData } from '../../core/fsrs';
 
 // =============================================================================
 // IRT Calibration Configuration
@@ -64,6 +64,12 @@ export function registerSessionHandlers(): void {
     }
 
     try {
+      // Verify goal has learning content before starting session
+      const objectCount = await prisma.languageObject.count({ where: { goalId } });
+      if (objectCount === 0) {
+        return error('학습 콘텐츠가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.');
+      }
+
       // Get or create default user
       let user = await prisma.user.findFirst();
       if (!user) {
@@ -289,7 +295,7 @@ export function registerSessionHandlers(): void {
         },
       });
 
-      const responseData: ResponseData = {
+      const responseData: FSRSResponseData = {
         correct,
         cueLevel: cueLevel as 0 | 1 | 2 | 3,
         responseTimeMs,
@@ -465,11 +471,11 @@ export function registerSessionHandlers(): void {
       }
 
       // Recalculate priority for the language object
-      const languageObject = await prisma.languageObject.findUnique({
+      const langObjForPriority = await prisma.languageObject.findUnique({
         where: { id: objectId },
       });
 
-      if (languageObject) {
+      if (langObjForPriority) {
         // Get user state for priority calculation
         const user = await prisma.user.findFirst();
         const userTheta = user?.thetaGlobal ?? 0;
@@ -480,13 +486,13 @@ export function registerSessionHandlers(): void {
         };
 
         const langObj = {
-          id: languageObject.id,
-          content: languageObject.content,
-          type: languageObject.type,
-          frequency: languageObject.frequency,
-          relationalDensity: languageObject.relationalDensity,
-          contextualContribution: languageObject.contextualContribution,
-          irtDifficulty: languageObject.irtDifficulty,
+          id: langObjForPriority.id,
+          content: langObjForPriority.content,
+          type: langObjForPriority.type,
+          frequency: langObjForPriority.frequency,
+          relationalDensity: langObjForPriority.relationalDensity,
+          contextualContribution: langObjForPriority.contextualContribution,
+          irtDifficulty: langObjForPriority.irtDifficulty,
         };
 
         // Compute new priority with urgency factored in
@@ -501,7 +507,7 @@ export function registerSessionHandlers(): void {
       }
 
       // Update ComponentErrorStats for bottleneck tracking (if error occurred)
-      if (!correct && languageObject) {
+      if (!correct && langObjForPriority) {
         const session = await prisma.session.findUnique({
           where: { id: sessionId },
           select: { userId: true, goalId: true },

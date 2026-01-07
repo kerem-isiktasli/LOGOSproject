@@ -486,10 +486,94 @@ function generateFreeResponsePrompt(spec: TaskSpec, relatedWords: string[]): str
 }
 
 /**
- * Definition cache to avoid repeated API calls for the same word.
+ * LRU Cache with TTL for definitions.
+ * Prevents memory leaks from unbounded growth.
  */
-const definitionCache = new Map<string, { definition: string; timestamp: number }>();
-const DEFINITION_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+class LRUCache<T> {
+  private cache = new Map<string, { value: T; timestamp: number; accessCount: number }>();
+  private readonly maxSize: number;
+  private readonly ttl: number;
+
+  constructor(maxSize: number = 1000, ttlMs: number = 24 * 60 * 60 * 1000) {
+    this.maxSize = maxSize;
+    this.ttl = ttlMs;
+  }
+
+  get(key: string): T | undefined {
+    const entry = this.cache.get(key);
+    if (!entry) return undefined;
+
+    // Check TTL
+    if (Date.now() - entry.timestamp > this.ttl) {
+      this.cache.delete(key);
+      return undefined;
+    }
+
+    // Update access count for LRU
+    entry.accessCount++;
+    return entry.value;
+  }
+
+  set(key: string, value: T): void {
+    // Evict expired entries first
+    this.evictExpired();
+
+    // If still at capacity, evict LRU
+    if (this.cache.size >= this.maxSize) {
+      this.evictLRU();
+    }
+
+    this.cache.set(key, {
+      value,
+      timestamp: Date.now(),
+      accessCount: 1,
+    });
+  }
+
+  private evictExpired(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.cache) {
+      if (now - entry.timestamp > this.ttl) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  private evictLRU(): void {
+    let minAccess = Infinity;
+    let oldestTime = Infinity;
+    let evictKey = '';
+
+    for (const [key, entry] of this.cache) {
+      // Prefer evicting entries with fewer accesses, break ties by oldest
+      if (entry.accessCount < minAccess ||
+          (entry.accessCount === minAccess && entry.timestamp < oldestTime)) {
+        minAccess = entry.accessCount;
+        oldestTime = entry.timestamp;
+        evictKey = key;
+      }
+    }
+
+    if (evictKey) {
+      this.cache.delete(evictKey);
+    }
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  get size(): number {
+    return this.cache.size;
+  }
+}
+
+/**
+ * Definition cache to avoid repeated API calls for the same word.
+ * Uses LRU eviction with max 1000 entries and 24-hour TTL.
+ */
+const definitionCache = new LRUCache<string>(1000, 24 * 60 * 60 * 1000);
+const DEFINITION_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours (for backward compat)
 
 /**
  * Get a definition for a word, using Claude API with caching and offline fallback.
@@ -504,12 +588,12 @@ async function getDefinition(
   targetLanguage: string = 'en',
   nativeLanguage: string = 'en'
 ): Promise<string> {
-  // Check cache first
+  // Check cache first (LRU cache handles TTL internally)
   const cacheKey = `${word}:${targetLanguage}:${nativeLanguage}`;
   const cached = definitionCache.get(cacheKey);
 
-  if (cached && Date.now() - cached.timestamp < DEFINITION_CACHE_TTL) {
-    return cached.definition;
+  if (cached) {
+    return cached;
   }
 
   // Try Claude API
@@ -527,11 +611,8 @@ async function getDefinition(
     // Extract just the definition from Claude's response
     const definition = extractDefinitionFromResponse(response.content, word);
 
-    // Cache the result
-    definitionCache.set(cacheKey, {
-      definition,
-      timestamp: Date.now(),
-    });
+    // Cache the result (LRU cache handles timestamp internally)
+    definitionCache.set(cacheKey, definition);
 
     return definition;
   } catch {
@@ -612,12 +693,12 @@ function generateOfflineDefinition(word: string): string {
  * Used in prompt generation where we can't await.
  */
 function getDefinitionPlaceholder(word: string): string {
-  // Check if we have a cached definition
+  // Check if we have a cached definition (LRU cache handles TTL internally)
   const cacheKey = `${word}:en:en`;
   const cached = definitionCache.get(cacheKey);
 
-  if (cached && Date.now() - cached.timestamp < DEFINITION_CACHE_TTL) {
-    return cached.definition;
+  if (cached) {
+    return cached;
   }
 
   // Return offline-generated definition
@@ -1612,5 +1693,481 @@ export function generateImplicatureTask(
     context: dialogue,
     options: allOptions,
     correctAnswer: impliedMeaning,
+  };
+}
+
+// =============================================================================
+// Multi-Object Task Generation
+// =============================================================================
+
+import {
+  createMultiObjectTaskSpec,
+  allocateQMatrixWeights,
+  objectTypeToComponent,
+  getQMatrixEntry,
+} from './multi-object-calibration.service';
+import type {
+  MultiObjectTaskSpec,
+  MultiObjectTarget,
+  LanguageObjectType,
+} from '../../core/types';
+
+/**
+ * Configuration for multi-object task generation.
+ */
+export interface MultiObjectTaskConfig extends TaskGenerationConfig {
+  /** Maximum number of target objects per task */
+  maxTargetObjects?: number;
+
+  /** Minimum weight for secondary objects */
+  minSecondaryWeight?: number;
+
+  /** Include related objects from same morphological family */
+  includeMorphFamily?: boolean;
+
+  /** Include syntactic pattern objects */
+  includeSyntacticPatterns?: boolean;
+
+  /** Include pragmatic context objects */
+  includePragmaticContext?: boolean;
+}
+
+const DEFAULT_MULTI_OBJECT_CONFIG: MultiObjectTaskConfig = {
+  maxTargetObjects: 4,
+  minSecondaryWeight: 0.1,
+  includeMorphFamily: true,
+  includeSyntacticPatterns: true,
+  includePragmaticContext: false,
+};
+
+/**
+ * Find related objects for multi-component task.
+ *
+ * Searches for objects that:
+ * 1. Share morphological family with primary
+ * 2. Participate in same syntactic patterns
+ * 3. Share pragmatic domain
+ */
+export async function findRelatedObjects(
+  primaryObjectId: string,
+  goalId: string,
+  config: MultiObjectTaskConfig = DEFAULT_MULTI_OBJECT_CONFIG
+): Promise<Array<{
+  id: string;
+  type: LanguageObjectType;
+  content: string;
+  irtDifficulty: number;
+  irtDiscrimination: number;
+  relationshipType: 'morph_family' | 'syntactic_pattern' | 'pragmatic_domain' | 'collocation';
+}>> {
+  const db = getPrisma();
+  const relatedObjects: Array<{
+    id: string;
+    type: LanguageObjectType;
+    content: string;
+    irtDifficulty: number;
+    irtDiscrimination: number;
+    relationshipType: 'morph_family' | 'syntactic_pattern' | 'pragmatic_domain' | 'collocation';
+  }> = [];
+
+  // Get primary object
+  const primary = await db.languageObject.findUnique({
+    where: { id: primaryObjectId },
+  });
+
+  if (!primary) return [];
+
+  // 1. Find morphological family members
+  if (config.includeMorphFamily) {
+    // Look for objects with same root/stem pattern
+    const contentRoot = primary.content.slice(0, Math.floor(primary.content.length * 0.6));
+    const morphFamily = await db.languageObject.findMany({
+      where: {
+        goalId,
+        id: { not: primaryObjectId },
+        type: { in: ['MORPH', 'LEX'] },
+        content: { startsWith: contentRoot },
+      },
+      take: 2,
+    });
+
+    morphFamily.forEach(obj => {
+      relatedObjects.push({
+        id: obj.id,
+        type: obj.type as LanguageObjectType,
+        content: obj.content,
+        irtDifficulty: obj.irtDifficulty,
+        irtDiscrimination: obj.irtDiscrimination,
+        relationshipType: 'morph_family',
+      });
+    });
+  }
+
+  // 2. Find syntactic pattern objects
+  if (config.includeSyntacticPatterns) {
+    const syntacticPatterns = await db.languageObject.findMany({
+      where: {
+        goalId,
+        type: 'SYNT',
+      },
+      take: 1,
+      orderBy: { priority: 'desc' },
+    });
+
+    syntacticPatterns.forEach(obj => {
+      relatedObjects.push({
+        id: obj.id,
+        type: obj.type as LanguageObjectType,
+        content: obj.content,
+        irtDifficulty: obj.irtDifficulty,
+        irtDiscrimination: obj.irtDiscrimination,
+        relationshipType: 'syntactic_pattern',
+      });
+    });
+  }
+
+  // 3. Find collocations
+  const collocations = await getCollocationsForWord(primaryObjectId, 3, 5);
+  for (const coll of collocations.slice(0, 2)) {
+    const collObj = await db.languageObject.findFirst({
+      where: {
+        goalId,
+        content: coll.word,
+        id: { not: primaryObjectId },
+      },
+    });
+
+    if (collObj) {
+      relatedObjects.push({
+        id: collObj.id,
+        type: collObj.type as LanguageObjectType,
+        content: collObj.content,
+        irtDifficulty: collObj.irtDifficulty,
+        irtDiscrimination: collObj.irtDiscrimination,
+        relationshipType: 'collocation',
+      });
+    }
+  }
+
+  // Limit to max target objects minus primary
+  const maxSecondary = (config.maxTargetObjects ?? 4) - 1;
+  return relatedObjects.slice(0, maxSecondary);
+}
+
+/**
+ * Generate a multi-object task specification.
+ *
+ * Creates a task that targets multiple linguistic component objects
+ * simultaneously, with Q-matrix weight allocation.
+ */
+export async function generateMultiObjectTask(
+  primaryItem: LearningQueueItem,
+  sessionId: string,
+  goalId: string,
+  config: MultiObjectTaskConfig = DEFAULT_MULTI_OBJECT_CONFIG
+): Promise<{ task: GeneratedTask; multiObjectSpec: MultiObjectTaskSpec } | null> {
+  const db = getPrisma();
+
+  // Get primary object
+  const primaryObject = await db.languageObject.findUnique({
+    where: { id: primaryItem.objectId },
+  });
+
+  if (!primaryObject) return null;
+
+  // Get mastery state
+  const mastery = await getMasteryState(primaryItem.objectId, sessionId);
+  const stage = mastery?.stage ?? 0;
+  const cueFreeAccuracy = mastery?.cueFreeAccuracy ?? 0;
+
+  // Find related objects
+  const relatedObjects = await findRelatedObjects(primaryItem.objectId, goalId, config);
+
+  // Build z(w) vector for task matching
+  const zVector = extractZVector({
+    frequency: primaryObject.frequency ?? 0.5,
+    relationalDensity: primaryObject.relationalDensity ?? 0.5,
+    domainDistribution: typeof primaryObject.domainDistribution === 'string'
+      ? JSON.parse(primaryObject.domainDistribution)
+      : primaryObject.domainDistribution ?? {},
+    morphologicalScore: primaryObject.morphologicalScore ?? 0.5,
+    phonologicalDifficulty: primaryObject.phonologicalDifficulty ?? 0.5,
+  } as WordDifficultyResult);
+
+  // Get task recommendation
+  const wordProfile: WordProfile = {
+    content: primaryObject.content,
+    type: primaryObject.type,
+    zVector,
+    masteryStage: stage as 0 | 1 | 2 | 3 | 4,
+    cueFreeAccuracy,
+    exposureCount: mastery?.exposureCount ?? 0,
+  };
+  const recommendation = recommendTask(wordProfile);
+
+  // Map task type to format
+  const taskTypeToFormat: Record<string, TaskFormat> = {
+    recognition: 'mcq',
+    recall_cued: 'fill_blank',
+    recall_free: 'fill_blank',
+    word_formation: 'fill_blank',
+    collocation: 'matching',
+    production: 'free_response',
+    sentence_combining: 'free_response',
+    register_shift: 'free_response',
+    rapid_response: 'mcq',
+    error_correction: 'fill_blank',
+  };
+
+  const format = taskTypeToFormat[recommendation.taskType] ?? selectTaskFormat(stage);
+  const modality = config.preferredModality ?? (getOptimalModality(zVector) as TaskModality);
+
+  // Build multi-object target list
+  const allObjects = [
+    {
+      id: primaryObject.id,
+      type: primaryObject.type as LanguageObjectType,
+      content: primaryObject.content,
+      irtDifficulty: primaryObject.irtDifficulty,
+      irtDiscrimination: primaryObject.irtDiscrimination,
+      isPrimary: true,
+    },
+    ...relatedObjects.map(obj => ({
+      id: obj.id,
+      type: obj.type,
+      content: obj.content,
+      irtDifficulty: obj.irtDifficulty,
+      irtDiscrimination: obj.irtDiscrimination,
+      isPrimary: false,
+    })),
+  ];
+
+  // Determine fluency task
+  const isFluencyTask = recommendation.taskType === 'rapid_response' ||
+    shouldBeFluencyTask(stage, cueFreeAccuracy, config.fluencyRatio);
+
+  // Generate expected answer based on task type
+  let expectedAnswer = primaryObject.content;
+  if (recommendation.taskType === 'sentence_writing' || recommendation.taskType === 'production') {
+    // For production tasks, expected answer is more flexible
+    expectedAnswer = `Use "${primaryObject.content}" in a sentence.`;
+  }
+
+  // Get goal domain
+  const goal = await db.goal.findUnique({ where: { id: goalId } });
+  const domain = goal?.domain ?? 'general';
+
+  // Create multi-object task spec
+  const multiObjectSpec = createMultiObjectTaskSpec(
+    `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    sessionId,
+    goalId,
+    allObjects,
+    recommendation.taskType as import('../../core/types').TaskType,
+    format as import('../../core/types').TaskFormat,
+    modality as import('../../core/types').TaskModality,
+    domain,
+    expectedAnswer,
+    isFluencyTask
+  );
+
+  // Generate standard task content
+  const cueLevel = determineCueLevel(
+    cueFreeAccuracy,
+    mastery?.cueAssistedAccuracy ?? 0,
+    mastery?.exposureCount ?? 0,
+    config.maxCueLevel
+  );
+
+  const hints = generateHints(primaryObject.content, cueLevel);
+  const collocations = await getCollocationsForWord(primaryItem.objectId, 3, 5);
+  const relatedWords = collocations.map(c => c.word);
+
+  let prompt: string;
+  let options: string[] | undefined;
+  let context: string | undefined;
+
+  const spec: TaskSpec = {
+    objectId: primaryItem.objectId,
+    content: primaryObject.content,
+    type: primaryObject.type,
+    format,
+    modality,
+    cueLevel,
+    difficulty: multiObjectSpec.compositeDifficulty,
+    isFluencyTask,
+  };
+
+  // Generate format-specific content
+  switch (format) {
+    case 'mcq':
+      options = await generateMCQOptions(primaryItem.objectId, primaryObject.content);
+      prompt = generateMCQPrompt(spec, relatedWords);
+      break;
+
+    case 'fill_blank':
+      const result = generateFillBlankPrompt(spec, relatedWords);
+      prompt = result.prompt;
+      context = result.context;
+      break;
+
+    case 'matching':
+      prompt = `Match the word with its definition or usage.`;
+      break;
+
+    case 'ordering':
+      prompt = `Arrange the words in the correct order.`;
+      break;
+
+    case 'free_response':
+      prompt = generateFreeResponsePrompt(spec, relatedWords);
+      break;
+
+    default:
+      prompt = `Practice the word: ${primaryObject.content}`;
+  }
+
+  // Add multi-object context to prompt if multiple targets
+  if (multiObjectSpec.targetObjects.length > 1) {
+    const secondaryContents = multiObjectSpec.targetObjects
+      .filter(t => !t.isPrimaryTarget)
+      .map(t => t.content)
+      .slice(0, 2);
+
+    if (secondaryContents.length > 0) {
+      prompt += `\n\nRelated concepts: ${secondaryContents.join(', ')}`;
+    }
+  }
+
+  const task: GeneratedTask = {
+    spec,
+    prompt,
+    expectedAnswer,
+    options,
+    hints: cueLevel > 0 ? hints : undefined,
+    context,
+    relatedWords: relatedWords.length > 0 ? relatedWords : undefined,
+    metadata: {
+      generatedAt: new Date(),
+      source: 'template',
+      estimatedTimeSeconds: isFluencyTask ? 10 : 30,
+    },
+  };
+
+  return { task, multiObjectSpec };
+}
+
+/**
+ * Determine if multi-object processing should be used for a task.
+ *
+ * Use multi-object processing when:
+ * - Task type involves multiple components (production, sentence writing, etc.)
+ * - Mastery stage >= 2 (controlled production)
+ * - Related objects are available
+ */
+export function shouldUseMultiObjectTask(
+  taskType: string,
+  masteryStage: number,
+  hasRelatedObjects: boolean
+): boolean {
+  // Task types that naturally involve multiple components
+  const multiComponentTaskTypes = [
+    'production',
+    'sentence_writing',
+    'sentence_combining',
+    'register_shift',
+    'error_correction',
+    'translation',
+  ];
+
+  // Multi-object for advanced task types
+  if (multiComponentTaskTypes.includes(taskType)) {
+    return true;
+  }
+
+  // Multi-object for higher mastery stages with related objects
+  if (masteryStage >= 2 && hasRelatedObjects) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Enhanced task generation that automatically uses multi-object
+ * processing when appropriate.
+ */
+export async function generateTaskWithAutoMultiObject(
+  item: LearningQueueItem,
+  sessionId: string,
+  goalId: string,
+  config: TaskGenerationConfig & MultiObjectTaskConfig = {}
+): Promise<{
+  task: GeneratedTask;
+  multiObjectSpec?: MultiObjectTaskSpec;
+  usedMultiObject: boolean;
+}> {
+  const db = getPrisma();
+
+  // Get object and mastery
+  const object = await db.languageObject.findUnique({
+    where: { id: item.objectId },
+  });
+
+  if (!object) {
+    throw new Error(`Language object not found: ${item.objectId}`);
+  }
+
+  const mastery = await getMasteryState(item.objectId, sessionId);
+  const stage = mastery?.stage ?? 0;
+
+  // Find related objects to check availability
+  const relatedObjects = await findRelatedObjects(item.objectId, goalId, config);
+
+  // Get task recommendation for type check
+  const zVector = extractZVector({
+    frequency: object.frequency ?? 0.5,
+    relationalDensity: object.relationalDensity ?? 0.5,
+    domainDistribution: typeof object.domainDistribution === 'string'
+      ? JSON.parse(object.domainDistribution)
+      : object.domainDistribution ?? {},
+    morphologicalScore: object.morphologicalScore ?? 0.5,
+    phonologicalDifficulty: object.phonologicalDifficulty ?? 0.5,
+  } as WordDifficultyResult);
+
+  const wordProfile: WordProfile = {
+    content: object.content,
+    type: object.type,
+    zVector,
+    masteryStage: stage as 0 | 1 | 2 | 3 | 4,
+    cueFreeAccuracy: mastery?.cueFreeAccuracy ?? 0,
+    exposureCount: mastery?.exposureCount ?? 0,
+  };
+  const recommendation = recommendTask(wordProfile);
+
+  // Check if we should use multi-object processing
+  const useMultiObject = shouldUseMultiObjectTask(
+    recommendation.taskType,
+    stage,
+    relatedObjects.length > 0
+  );
+
+  if (useMultiObject) {
+    const result = await generateMultiObjectTask(item, sessionId, goalId, config);
+    if (result) {
+      return {
+        task: result.task,
+        multiObjectSpec: result.multiObjectSpec,
+        usedMultiObject: true,
+      };
+    }
+  }
+
+  // Fall back to single-object task generation
+  const task = await generateTaskWithMatching(item, config);
+
+  return {
+    task,
+    usedMultiObject: false,
   };
 }

@@ -168,7 +168,7 @@ export async function bulkCreateCollocations(
 
   const result = await db.collocation.createMany({
     data: collocations,
-    skipDuplicates: true,
+    
   });
 
   return result.count;
@@ -215,6 +215,7 @@ export async function deleteCollocation(
 
 /**
  * Get collocation network for visualization.
+ * Optimized to avoid N+1 queries by pre-fetching all words for the goal.
  */
 export async function getCollocationNetwork(
   goalId: string,
@@ -224,8 +225,41 @@ export async function getCollocationNetwork(
 ): Promise<CollocationNetwork> {
   const db = getPrisma();
 
+  // Pre-fetch all words for this goal to avoid N+1 queries
+  const allWords = await db.languageObject.findMany({
+    where: { goalId },
+    select: { id: true, content: true, type: true, priority: true, goalId: true },
+  });
+  const wordMap = new Map(allWords.map((w) => [w.id, w]));
+
+  // Pre-fetch all collocations for this goal with minPMI filter
+  const allCollocations = await db.collocation.findMany({
+    where: {
+      word1: { goalId },
+      pmi: { gte: minPMI },
+    },
+    select: {
+      word1Id: true,
+      word2Id: true,
+      pmi: true,
+      significance: true,
+    },
+    orderBy: { pmi: 'desc' },
+  });
+
+  // Build adjacency list for efficient lookup
+  const adjacencyMap = new Map<string, typeof allCollocations>();
+  for (const c of allCollocations) {
+    // Add to both word1 and word2 lists
+    if (!adjacencyMap.has(c.word1Id)) adjacencyMap.set(c.word1Id, []);
+    if (!adjacencyMap.has(c.word2Id)) adjacencyMap.set(c.word2Id, []);
+    adjacencyMap.get(c.word1Id)!.push(c);
+    adjacencyMap.get(c.word2Id)!.push(c);
+  }
+
   const nodes: Map<string, CollocationNetwork['nodes'][0]> = new Map();
   const edges: CollocationNetwork['edges'] = [];
+  const edgeSet = new Set<string>();
   const visited = new Set<string>();
 
   // BFS to build network
@@ -235,11 +269,9 @@ export async function getCollocationNetwork(
     queue.push({ wordId: centerWordId, currentDepth: 0 });
   } else {
     // Start from top priority words
-    const topWords = await db.languageObject.findMany({
-      where: { goalId },
-      orderBy: { priority: 'desc' },
-      take: 10,
-    });
+    const topWords = [...allWords]
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, 10);
     topWords.forEach((w) => queue.push({ wordId: w.id, currentDepth: 0 }));
   }
 
@@ -249,11 +281,8 @@ export async function getCollocationNetwork(
     if (visited.has(wordId) || currentDepth > depth) continue;
     visited.add(wordId);
 
-    // Get the word
-    const word = await db.languageObject.findUnique({
-      where: { id: wordId },
-    });
-
+    // Get the word from pre-fetched map
+    const word = wordMap.get(wordId);
     if (!word || word.goalId !== goalId) continue;
 
     // Add node
@@ -264,31 +293,21 @@ export async function getCollocationNetwork(
       priority: word.priority,
     });
 
-    // Get collocations
-    const collocations = await db.collocation.findMany({
-      where: {
-        OR: [{ word1Id: wordId }, { word2Id: wordId }],
-        pmi: { gte: minPMI },
-      },
-      include: {
-        word1: true,
-        word2: true,
-      },
-      orderBy: { pmi: 'desc' },
-      take: 10,
-    });
+    // Get collocations from pre-built adjacency list
+    const collocations = (adjacencyMap.get(wordId) || []).slice(0, 10);
 
     for (const c of collocations) {
       const isWord1 = c.word1Id === wordId;
-      const otherWord = isWord1 ? c.word2 : c.word1;
-      const otherId = otherWord.id;
+      const otherId = isWord1 ? c.word2Id : c.word1Id;
+      const otherWord = wordMap.get(otherId);
 
       // Only include words from same goal
-      if (otherWord.goalId !== goalId) continue;
+      if (!otherWord || otherWord.goalId !== goalId) continue;
 
-      // Add edge (avoid duplicates)
+      // Add edge (avoid duplicates using Set)
       const edgeKey = [wordId, otherId].sort().join('-');
-      if (!edges.some((e) => [e.source, e.target].sort().join('-') === edgeKey)) {
+      if (!edgeSet.has(edgeKey)) {
+        edgeSet.add(edgeKey);
         edges.push({
           source: wordId,
           target: otherId,

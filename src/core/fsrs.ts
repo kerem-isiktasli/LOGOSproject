@@ -38,7 +38,13 @@ export interface MasteryState {
   exposureCount: number;
 }
 
-export interface ResponseData {
+/**
+ * Response data for FSRS rating conversion.
+ * Renamed to avoid confusion with bottleneck.ts ResponseData.
+ *
+ * @see MasteryResponse in types.ts for the canonical type
+ */
+export interface FSRSResponseData {
   correct: boolean;
   cueLevel: 0 | 1 | 2 | 3;  // 0 = cue-free
   responseTimeMs: number;
@@ -278,7 +284,7 @@ export function createInitialMasteryState(): MasteryState {
  * - Correct, slow → 3 (Good)
  * - Correct, fast → 4 (Easy)
  */
-export function responseToRating(response: ResponseData): FSRSRating {
+export function responseToRating(response: FSRSResponseData): FSRSRating {
   if (!response.correct) {
     return 1;  // Again
   }
@@ -301,7 +307,7 @@ export function responseToRating(response: ResponseData): FSRSRating {
  */
 export function updateMastery(
   state: MasteryState,
-  response: ResponseData,
+  response: FSRSResponseData,
   fsrs: FSRS,
   now: Date
 ): MasteryState {

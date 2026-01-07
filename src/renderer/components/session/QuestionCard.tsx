@@ -79,13 +79,53 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   const [loadingHint, setLoadingHint] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState(timeLimit || 0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
 
   // Auto-focus input on mount
   useEffect(() => {
     if (mode === 'typing' || mode === 'recall') {
       inputRef.current?.focus();
+    } else if (mode === 'recognition') {
+      // Focus the card for keyboard navigation in recognition mode
+      cardRef.current?.focus();
     }
   }, [mode, item.id]);
+
+  // Global keyboard shortcuts for MCQ options (1-4 or A-D)
+  useEffect(() => {
+    if (mode !== 'recognition') return;
+
+    const handleKeyPress = (e: KeyboardEvent) => {
+      // Ignore if user is typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      const key = e.key.toUpperCase();
+      let optionIndex = -1;
+
+      // Support both number keys (1-4) and letter keys (A-D)
+      if (key >= '1' && key <= '4') {
+        optionIndex = parseInt(key) - 1;
+      } else if (key >= 'A' && key <= 'D') {
+        optionIndex = key.charCodeAt(0) - 'A'.charCodeAt(0);
+      }
+
+      if (optionIndex >= 0 && optionIndex < options.length) {
+        e.preventDefault();
+        handleOptionSelect(options[optionIndex]);
+      }
+
+      // H key for hint
+      if (key === 'H' && onRequestHint && currentCueLevel < 3) {
+        e.preventDefault();
+        handleHintRequest();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyPress);
+    return () => window.removeEventListener('keydown', handleKeyPress);
+  }, [mode, options, currentCueLevel, onRequestHint]);
 
   // Timer countdown
   useEffect(() => {
@@ -139,12 +179,19 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   };
 
   return (
-    <GlassCard className={`question-card ${className}`} padding="lg">
+    <GlassCard
+      ref={cardRef}
+      className={`question-card ${className}`}
+      padding="lg"
+      tabIndex={mode === 'recognition' ? 0 : undefined}
+      role="region"
+      aria-label={`Question ${progress?.current || 1} of ${progress?.total || 1}: ${item.content}`}
+    >
       {/* Header with progress and timer */}
       <div className="question-header">
         <div className="question-meta">
           {progress && (
-            <span className="question-progress">
+            <span className="question-progress" aria-label={`Question ${progress.current} of ${progress.total}`}>
               {progress.current} / {progress.total}
             </span>
           )}
@@ -161,8 +208,11 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
             className={`question-timer ${
               timeRemaining <= 10 ? 'question-timer--warning' : ''
             }`}
+            role="timer"
+            aria-live="polite"
+            aria-label={`Time remaining: ${formatTime(timeRemaining)}`}
           >
-            <TimerIcon />
+            <TimerIcon aria-hidden="true" />
             <span>{formatTime(timeRemaining)}</span>
           </div>
         )}
@@ -217,7 +267,11 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       {/* Answer input area */}
       <div className="question-input-area">
         {mode === 'recognition' ? (
-          <div className="recognition-options">
+          <div
+            className="recognition-options"
+            role="group"
+            aria-label="Answer options. Press A-D or 1-4 to select."
+          >
             {options.map((option, index) => (
               <GlassButton
                 key={index}
@@ -225,8 +279,9 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
                 size="lg"
                 onClick={() => handleOptionSelect(option)}
                 className="recognition-option"
+                aria-label={`Option ${String.fromCharCode(65 + index)}: ${option}. Press ${String.fromCharCode(65 + index)} or ${index + 1} to select.`}
               >
-                <span className="option-key">{String.fromCharCode(65 + index)}</span>
+                <span className="option-key" aria-hidden="true">{String.fromCharCode(65 + index)}</span>
                 <span className="option-text">{option}</span>
               </GlassButton>
             ))}
@@ -250,7 +305,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
       </div>
 
       {/* Action buttons */}
-      <div className="question-actions">
+      <div className="question-actions" role="group" aria-label="Question actions">
         <div className="question-actions-left">
           {onRequestHint && currentCueLevel < 3 && (
             <GlassButton
@@ -259,8 +314,9 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
               onClick={handleHintRequest}
               loading={loadingHint}
               disabled={loadingHint}
+              aria-label={`Get hint. ${3 - currentCueLevel} hints remaining. Press H for shortcut.`}
             >
-              <HintIcon />
+              <HintIcon aria-hidden="true" />
               Get Hint ({3 - currentCueLevel} left)
             </GlassButton>
           )}
@@ -269,13 +325,18 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         <div className="question-actions-right">
           {mode !== 'recognition' && (
             <>
-              <GlassButton variant="ghost" onClick={() => onSubmit('', 3)}>
+              <GlassButton
+                variant="ghost"
+                onClick={() => onSubmit('', 3)}
+                aria-label="Skip this question"
+              >
                 Skip
               </GlassButton>
               <GlassButton
                 variant="primary"
                 onClick={handleSubmit}
                 disabled={!answer.trim()}
+                aria-label="Submit your answer"
               >
                 Check Answer
               </GlassButton>

@@ -18,7 +18,7 @@ import {
   DEFAULT_PARAMETERS,
   STAGE_THRESHOLDS,
 } from '../fsrs';
-import type { FSRSCard, FSRSRating, ResponseData, MasteryState } from '../fsrs';
+import type { FSRSCard, FSRSResponseData, MasteryState } from '../fsrs';
 
 describe('FSRS Class', () => {
   let fsrs: FSRS;
@@ -244,7 +244,7 @@ describe('Helper Functions', () => {
 
   describe('responseToRating', () => {
     it('returns 1 (Again) for incorrect responses', () => {
-      const response: ResponseData = {
+      const response: FSRSResponseData = {
         correct: false,
         cueLevel: 0,
         responseTimeMs: 2000,
@@ -254,7 +254,7 @@ describe('Helper Functions', () => {
     });
 
     it('returns 2 (Hard) for correct with cues', () => {
-      const response: ResponseData = {
+      const response: FSRSResponseData = {
         correct: true,
         cueLevel: 1,
         responseTimeMs: 3000,
@@ -264,7 +264,7 @@ describe('Helper Functions', () => {
     });
 
     it('returns 3 (Good) for slow correct without cues', () => {
-      const response: ResponseData = {
+      const response: FSRSResponseData = {
         correct: true,
         cueLevel: 0,
         responseTimeMs: 6000, // > 5000ms
@@ -274,7 +274,7 @@ describe('Helper Functions', () => {
     });
 
     it('returns 4 (Easy) for fast correct without cues', () => {
-      const response: ResponseData = {
+      const response: FSRSResponseData = {
         correct: true,
         cueLevel: 0,
         responseTimeMs: 2000, // <= 5000ms
@@ -290,7 +290,7 @@ describe('Helper Functions', () => {
       const state = createInitialMasteryState();
       const now = new Date();
 
-      const response: ResponseData = {
+      const response: FSRSResponseData = {
         correct: true,
         cueLevel: 0,
         responseTimeMs: 2000,
@@ -308,7 +308,7 @@ describe('Helper Functions', () => {
       const state = createInitialMasteryState();
       const now = new Date();
 
-      const cueFree: ResponseData = {
+      const cueFree: FSRSResponseData = {
         correct: true,
         cueLevel: 0,
         responseTimeMs: 2000,
@@ -323,7 +323,7 @@ describe('Helper Functions', () => {
       const state = createInitialMasteryState();
       const now = new Date();
 
-      const cueAssisted: ResponseData = {
+      const cueAssisted: FSRSResponseData = {
         correct: true,
         cueLevel: 2,
         responseTimeMs: 3000,
@@ -340,7 +340,7 @@ describe('Helper Functions', () => {
 
       // Simulate multiple correct responses to advance stage
       for (let i = 0; i < 10; i++) {
-        const response: ResponseData = {
+        const response: FSRSResponseData = {
           correct: true,
           cueLevel: 0,
           responseTimeMs: 2000,

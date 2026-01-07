@@ -287,7 +287,7 @@ export async function addLanguageObjectsToGoal(
         irtDiscrimination: obj.irtDiscrimination ?? 1,
       };
     }),
-    skipDuplicates: true,
+    
   });
 
   return result.count;

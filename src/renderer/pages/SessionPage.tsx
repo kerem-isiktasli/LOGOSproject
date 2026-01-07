@@ -22,13 +22,18 @@ interface SessionPageProps {
 }
 
 // Task format types for the Training Gym
-type TaskFormat = 'mcq' | 'fill_blank' | 'free_response' | 'typing';
+// Extended to support multi-component learning (MORPH, G2P, SYNT, PRAG)
+type TaskFormat = 'mcq' | 'fill_blank' | 'free_response' | 'typing' | 'morpheme_analysis' | 'pronunciation' | 'sentence_completion' | 'register_selection';
+
+// Language object types from corpus pipeline
+type ObjectType = 'LEX' | 'MORPH' | 'G2P' | 'SYNT' | 'PRAG';
 
 interface SessionTask {
   id: string;
   objectId: string;
   content: string;
   type: string;
+  objectType?: ObjectType;  // Multi-component object type
   format: TaskFormat;
   prompt: string;
   expectedAnswer: string;
@@ -37,6 +42,7 @@ interface SessionTask {
   hints?: string[];
   masteryStage: 0 | 1 | 2 | 3 | 4;
   difficulty: number;
+  metadata?: Record<string, any>;  // Additional metadata for specialized tasks
 }
 
 interface SessionSummary {
@@ -96,48 +102,126 @@ export const SessionPage: React.FC<SessionPageProps> = ({ onNavigateBack }) => {
   }, [sessionPhase, sessionStartTime]);
 
   // Transform queue items into session tasks
+  // Uses server-generated task specs when available, falls back to local generation
+  // Now supports multi-component object types: LEX, MORPH, G2P, SYNT, PRAG
   const transformQueueToTasks = useCallback((queueItems: any[]): SessionTask[] => {
     return queueItems.map((item, index) => {
       const masteryStage = item.masteryStage ?? 0;
-      const difficulty = item.object?.difficulty ?? item.difficulty ?? 0.5;
       const content = item.object?.content ?? item.content;
-      const type = item.object?.type ?? item.type ?? 'word';
+      const type = item.object?.type ?? item.type ?? 'LEX';
+      const objectType = type as ObjectType;
+      const metadata = item.object?.metadata ? JSON.parse(item.object.metadata) : {};
 
-      // Determine task format based on mastery stage and item type
+      // Use server-generated task if available
+      if (item.task) {
+        const serverTask = item.task;
+        return {
+          id: `task-${index}-${item.object?.id ?? item.id}`,
+          objectId: item.object?.id ?? item.id,
+          content,
+          type,
+          objectType,
+          format: serverTask.format as TaskFormat,
+          prompt: serverTask.prompt,
+          expectedAnswer: serverTask.expectedAnswer ?? content,
+          options: serverTask.options,
+          blankTemplate: serverTask.format === 'fill_blank' ? createBlankTemplate(content) : undefined,
+          hints: serverTask.hints ?? [],
+          masteryStage: masteryStage as 0 | 1 | 2 | 3 | 4,
+          difficulty: serverTask.difficulty ?? 0.5,
+          metadata,
+        };
+      }
+
+      // Fallback: generate task locally based on object type
+      const difficulty = item.object?.difficulty ?? item.difficulty ?? 0.5;
       let format: TaskFormat = 'free_response';
       let options: string[] | undefined;
       let blankTemplate: string | undefined;
+      let prompt: string;
 
-      if (masteryStage === 0 || masteryStage === 1) {
-        // Lower mastery: use MCQ for recognition practice
-        format = 'mcq';
-        // Generate distractor options (in real impl, get from API)
-        options = generateDistractors(content, queueItems.map(q => q.object?.content ?? q.content));
-      } else if (masteryStage === 2) {
-        // Medium mastery: fill-in-blank
-        format = 'fill_blank';
-        blankTemplate = createBlankTemplate(content);
-      } else {
-        // High mastery: free response / typing
-        format = 'free_response';
+      // Generate format and prompt based on object type
+      switch (objectType) {
+        case 'MORPH':
+          // Morphological analysis tasks
+          if (masteryStage <= 1) {
+            format = 'mcq';
+            options = generateMorphDistractors(content, metadata, queueItems);
+            prompt = createMorphPrompt(content, metadata, format);
+          } else {
+            format = 'morpheme_analysis';
+            prompt = createMorphPrompt(content, metadata, format);
+          }
+          break;
+
+        case 'G2P':
+          // Pronunciation/spelling tasks
+          if (masteryStage <= 1) {
+            format = 'mcq';
+            options = generateG2PDistractors(content, metadata, queueItems);
+            prompt = createG2PPrompt(content, metadata, format);
+          } else {
+            format = 'pronunciation';
+            prompt = createG2PPrompt(content, metadata, format);
+          }
+          break;
+
+        case 'SYNT':
+          // Syntactic/grammar tasks
+          if (masteryStage <= 1) {
+            format = 'mcq';
+            options = generateSyntDistractors(content, metadata, queueItems);
+            prompt = createSyntPrompt(content, metadata, format);
+          } else {
+            format = 'sentence_completion';
+            blankTemplate = createSentenceBlank(content);
+            prompt = createSyntPrompt(content, metadata, format);
+          }
+          break;
+
+        case 'PRAG':
+          // Pragmatic/register tasks
+          if (masteryStage <= 2) {
+            format = 'mcq';
+            options = generatePragDistractors(content, metadata, queueItems);
+            prompt = createPragPrompt(content, metadata, format);
+          } else {
+            format = 'register_selection';
+            prompt = createPragPrompt(content, metadata, format);
+          }
+          break;
+
+        case 'LEX':
+        default:
+          // Lexical/vocabulary tasks (original behavior)
+          if (masteryStage === 0 || masteryStage === 1) {
+            format = 'mcq';
+            options = generateDistractors(content, queueItems.map(q => q.object?.content ?? q.content));
+          } else if (masteryStage === 2) {
+            format = 'fill_blank';
+            blankTemplate = createBlankTemplate(content);
+          } else {
+            format = 'free_response';
+          }
+          prompt = createPrompt(content, type, format);
+          break;
       }
-
-      // Create prompt based on type and format
-      const prompt = createPrompt(content, type, format);
 
       return {
         id: `task-${index}-${item.object?.id ?? item.id}`,
         objectId: item.object?.id ?? item.id,
         content,
         type,
+        objectType,
         format,
         prompt,
-        expectedAnswer: content,
+        expectedAnswer: getExpectedAnswer(content, objectType, metadata),
         options,
         blankTemplate,
         hints: [],
         masteryStage: masteryStage as 0 | 1 | 2 | 3 | 4,
         difficulty,
+        metadata,
       };
     });
   }, []);
@@ -650,6 +734,236 @@ function getGrade(accuracy: number): { label: string; variant: 'success' | 'prim
   if (accuracy >= 0.75) return { label: 'Great!', variant: 'primary', emoji: '🎉' };
   if (accuracy >= 0.6) return { label: 'Good', variant: 'warning', emoji: '👍' };
   return { label: 'Keep practicing', variant: 'danger', emoji: '💪' };
+}
+
+// =============================================================================
+// Multi-Component Task Generation Helpers
+// Reference: Bauer & Nation (1993), Lu L2SCA (2010), Taguchi (2015)
+// =============================================================================
+
+/**
+ * Generate morphological task prompt based on format.
+ * Reference: Bauer & Nation (1993) - affix productivity levels
+ */
+function createMorphPrompt(content: string, metadata: any, format: TaskFormat): string {
+  const baseWord = metadata?.baseWord || content.split(' = ')[0];
+  const root = metadata?.root || baseWord;
+
+  switch (format) {
+    case 'mcq':
+      return `What is the root/base form of "${baseWord}"?`;
+    case 'morpheme_analysis':
+      return `Break down "${baseWord}" into its morphemes (prefix + root + suffix):`;
+    default:
+      return `Analyze the word structure: ${baseWord}`;
+  }
+}
+
+/**
+ * Generate G2P/pronunciation task prompt.
+ * Reference: Venezky (1970) - spelling-sound correspondence
+ */
+function createG2PPrompt(content: string, metadata: any, format: TaskFormat): string {
+  const baseWord = metadata?.baseWord || content.split(' [')[0];
+  const irregularities = metadata?.irregularities || [];
+
+  switch (format) {
+    case 'mcq':
+      if (metadata?.silentLetters?.length > 0) {
+        return `Which letter(s) are silent in "${baseWord}"?`;
+      }
+      return `What is the correct pronunciation pattern for "${baseWord}"?`;
+    case 'pronunciation':
+      return `Identify the pronunciation challenges in "${baseWord}":`;
+    default:
+      return `Analyze the spelling-sound relationship: ${baseWord}`;
+  }
+}
+
+/**
+ * Generate syntactic task prompt.
+ * Reference: Lu L2SCA (2010) - syntactic complexity measures
+ */
+function createSyntPrompt(content: string, metadata: any, format: TaskFormat): string {
+  const cefrLevel = metadata?.estimatedCEFR || 'B1';
+  const clauseCount = metadata?.clauseCount || 1;
+
+  switch (format) {
+    case 'mcq':
+      return `What is the grammatical structure of this sentence?`;
+    case 'sentence_completion':
+      return `Complete the sentence with the correct grammatical form:`;
+    default:
+      return `Analyze the syntactic structure (${cefrLevel} level):`;
+  }
+}
+
+/**
+ * Generate pragmatic task prompt.
+ * Reference: Taguchi (2015) - pragmatic competence, Biber (1988) - register analysis
+ */
+function createPragPrompt(content: string, metadata: any, format: TaskFormat): string {
+  const speechAct = metadata?.speechAct || 'communicate';
+  const register = metadata?.register || 'neutral';
+  const pragType = metadata?.pragmaticType || 'general';
+
+  switch (format) {
+    case 'mcq':
+      return `In what context would you use: "${content}"?`;
+    case 'register_selection':
+      return `Select the appropriate register/formality level for this ${speechAct}:`;
+    default:
+      return `When would you use this expression? (${register} register)`;
+  }
+}
+
+/**
+ * Generate morphological distractors.
+ */
+function generateMorphDistractors(content: string, metadata: any, queueItems: any[]): string[] {
+  const root = metadata?.root || content;
+  const distractors: string[] = [];
+
+  // Add similar roots from queue
+  for (const item of queueItems) {
+    if (item.object?.type === 'MORPH' && item.object?.content !== content) {
+      const itemMeta = item.object?.metadata ? JSON.parse(item.object.metadata) : {};
+      if (itemMeta.root && itemMeta.root !== root) {
+        distractors.push(itemMeta.root);
+      }
+    }
+  }
+
+  // Add some common wrong patterns
+  const commonDistractors = [
+    root + 's',
+    root + 'ed',
+    root + 'ing',
+    root.slice(0, -1),
+    root.slice(0, -2),
+  ].filter(d => d !== root && d.length > 2);
+
+  distractors.push(...commonDistractors);
+
+  return shuffleArray([root, ...distractors.slice(0, 3)]);
+}
+
+/**
+ * Generate G2P/pronunciation distractors.
+ */
+function generateG2PDistractors(content: string, metadata: any, queueItems: any[]): string[] {
+  const silentLetters = metadata?.silentLetters || [];
+  const baseWord = metadata?.baseWord || content;
+
+  if (silentLetters.length > 0) {
+    // Generate options for silent letter question
+    const allLetters = baseWord.split('').filter((c: string) => /[a-z]/i.test(c));
+    const uniqueLetters = [...new Set(allLetters)];
+    const distractors = uniqueLetters.filter((l: string) => !silentLetters.includes(l)).slice(0, 3);
+    return shuffleArray([silentLetters.join(', '), ...distractors]);
+  }
+
+  // Default pronunciation pattern options
+  return shuffleArray([
+    'Regular pronunciation',
+    'Silent letters present',
+    'Irregular vowel sound',
+    'Consonant cluster',
+  ]);
+}
+
+/**
+ * Generate syntactic distractors.
+ */
+function generateSyntDistractors(content: string, metadata: any, queueItems: any[]): string[] {
+  const structures = [
+    'Simple sentence (SVO)',
+    'Complex sentence (subordinate clause)',
+    'Compound sentence (coordinating)',
+    'Passive construction',
+    'Relative clause',
+    'Conditional structure',
+  ];
+
+  // Determine the correct answer based on metadata
+  let correct = 'Simple sentence (SVO)';
+  if (metadata?.subordinationIndex > 0.5) {
+    correct = 'Complex sentence (subordinate clause)';
+  } else if (metadata?.passiveRatio > 0.3) {
+    correct = 'Passive construction';
+  } else if (metadata?.clauseCount > 1) {
+    correct = 'Compound sentence (coordinating)';
+  }
+
+  const distractors = structures.filter(s => s !== correct).slice(0, 3);
+  return shuffleArray([correct, ...distractors]);
+}
+
+/**
+ * Generate pragmatic distractors.
+ */
+function generatePragDistractors(content: string, metadata: any, queueItems: any[]): string[] {
+  const contexts = [
+    'Formal business meeting',
+    'Casual conversation with friends',
+    'Academic presentation',
+    'Medical consultation',
+    'Customer service interaction',
+    'Legal proceeding',
+  ];
+
+  // Determine correct context based on register and domain
+  const register = metadata?.register || 'neutral';
+  const domain = metadata?.domain || 'general';
+
+  let correct = 'Casual conversation with friends';
+  if (register === 'formal' || register === 'academic') {
+    correct = domain === 'medical' ? 'Medical consultation' :
+              domain === 'legal' ? 'Legal proceeding' :
+              domain === 'business' ? 'Formal business meeting' :
+              'Academic presentation';
+  } else if (register === 'professional') {
+    correct = 'Customer service interaction';
+  }
+
+  const distractors = contexts.filter(c => c !== correct).slice(0, 3);
+  return shuffleArray([correct, ...distractors]);
+}
+
+/**
+ * Create sentence blank for syntactic tasks.
+ */
+function createSentenceBlank(content: string): string {
+  // Find a suitable word to blank out (verb, noun, or key phrase)
+  const words = content.split(' ');
+  if (words.length <= 3) return content.replace(/\w+/, '____');
+
+  // Blank out a word in the middle third of the sentence
+  const startIdx = Math.floor(words.length / 3);
+  const endIdx = Math.floor(words.length * 2 / 3);
+  const blankIdx = startIdx + Math.floor(Math.random() * (endIdx - startIdx));
+
+  words[blankIdx] = '____';
+  return words.join(' ');
+}
+
+/**
+ * Get expected answer based on object type.
+ */
+function getExpectedAnswer(content: string, objectType: ObjectType, metadata: any): string {
+  switch (objectType) {
+    case 'MORPH':
+      return metadata?.root || content.split(' = ')[0];
+    case 'G2P':
+      return metadata?.silentLetters?.join(', ') || content.split(' [')[0];
+    case 'SYNT':
+    case 'PRAG':
+      // For MCQ tasks, the correct answer is handled by options
+      return content;
+    case 'LEX':
+    default:
+      return content;
+  }
 }
 
 export default SessionPage;

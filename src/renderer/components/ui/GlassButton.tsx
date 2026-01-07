@@ -58,6 +58,7 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
       fullWidth = false,
       disabled,
       className = '',
+      'aria-label': ariaLabel,
       ...props
     },
     ref
@@ -68,20 +69,28 @@ export const GlassButton = forwardRef<HTMLButtonElement, GlassButtonProps>(
     const widthClass = fullWidth ? 'w-full' : '';
     const disabledClass = disabled || loading ? 'opacity-50 cursor-not-allowed' : '';
 
+    // For icon-only buttons, aria-label is required for accessibility
+    const computedAriaLabel = iconOnly && !ariaLabel
+      ? (typeof children === 'string' ? children : 'Button')
+      : ariaLabel;
+
     return (
       <button
         ref={ref}
         className={`${baseClasses} ${sizeClass} ${iconOnlyClass} ${widthClass} ${disabledClass} ${className}`}
         disabled={disabled || loading}
+        aria-label={computedAriaLabel}
+        aria-busy={loading}
+        aria-disabled={disabled || loading}
         {...props}
       >
         {loading ? (
           <LoadingSpinner size={size} />
         ) : (
           <>
-            {iconLeft && <span className="button-icon-left">{iconLeft}</span>}
+            {iconLeft && <span className="button-icon-left" aria-hidden="true">{iconLeft}</span>}
             {!iconOnly && children}
-            {iconRight && <span className="button-icon-right">{iconRight}</span>}
+            {iconRight && <span className="button-icon-right" aria-hidden="true">{iconRight}</span>}
           </>
         )}
       </button>

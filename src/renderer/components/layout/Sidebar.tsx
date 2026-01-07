@@ -38,19 +38,25 @@ export interface NavItem {
   children?: NavItem[];
 }
 
+/**
+ * Goal display info derived from GoalSpec.
+ * Uses domain for category badge and genre for display name.
+ */
+export interface SidebarGoal {
+  id: string;
+  /** Display name - typically the genre (e.g., "conversation", "report") */
+  genre: string;
+  /** Domain category (e.g., "medical", "legal", "general") */
+  domain: string;
+  /** Optional modalities for additional context */
+  modality?: string[];
+}
+
 export interface SidebarProps {
   /** Current active goal */
-  activeGoal?: {
-    id: string;
-    name: string;
-    targetLanguage: string;
-  };
+  activeGoal?: SidebarGoal;
   /** List of available goals */
-  goals?: Array<{
-    id: string;
-    name: string;
-    targetLanguage: string;
-  }>;
+  goals?: SidebarGoal[];
   /** Callback when goal is changed */
   onGoalChange?: (goalId: string) => void;
   /** Callback to create a new goal */
@@ -140,10 +146,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             aria-expanded={goalSelectorOpen}
           >
             <div className="goal-selector-content">
-              <span className="goal-language">{activeGoal.targetLanguage.toUpperCase()}</span>
+              <span className="goal-language">{activeGoal.domain.toUpperCase()}</span>
               {!sidebarCollapsed && (
                 <>
-                  <span className="goal-name">{activeGoal.name}</span>
+                  <span className="goal-name">{activeGoal.genre}</span>
                   <ChevronIcon direction={goalSelectorOpen ? 'down' : 'right'} />
                 </>
               )}
@@ -162,8 +168,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     setGoalSelectorOpen(false);
                   }}
                 >
-                  <span className="goal-language">{goal.targetLanguage.toUpperCase()}</span>
-                  <span className="goal-name">{goal.name}</span>
+                  <span className="goal-language">{goal.domain.toUpperCase()}</span>
+                  <span className="goal-name">{goal.genre}</span>
                 </button>
               ))}
               {onCreateGoal && (
@@ -178,8 +184,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* Primary Navigation */}
-      <nav className="sidebar-nav">
-        <ul className="nav-list">
+      <nav className="sidebar-nav" aria-label="Primary navigation">
+        <ul className="nav-list" role="list">
           {navItems.map((item) => (
             <NavItemComponent key={item.id} item={item} collapsed={sidebarCollapsed} />
           ))}
@@ -191,8 +197,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Secondary Navigation */}
       {secondaryItems.length > 0 && (
-        <nav className="sidebar-nav sidebar-nav--secondary">
-          <ul className="nav-list">
+        <nav className="sidebar-nav sidebar-nav--secondary" aria-label="Secondary navigation">
+          <ul className="nav-list" role="list">
             {secondaryItems.map((item) => (
               <NavItemComponent key={item.id} item={item} collapsed={sidebarCollapsed} />
             ))}
@@ -429,13 +435,25 @@ const NavItemComponent: React.FC<{ item: NavItem; collapsed: boolean }> = ({
     }
   };
 
+  // Handle keyboard navigation
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      handleClick();
+    }
+  };
+
   const content = (
     <>
-      <span className="nav-item-icon">{item.icon}</span>
+      <span className="nav-item-icon" aria-hidden="true">{item.icon}</span>
       {!collapsed && (
         <>
           <span className="nav-item-label">{item.label}</span>
-          {item.badge && <span className="nav-item-badge">{item.badge}</span>}
+          {item.badge && (
+            <span className="nav-item-badge" aria-label={`${item.badge} notifications`}>
+              {item.badge}
+            </span>
+          )}
           {hasChildren && (
             <ChevronIcon direction={expanded ? 'down' : 'right'} />
           )}
@@ -448,21 +466,39 @@ const NavItemComponent: React.FC<{ item: NavItem; collapsed: boolean }> = ({
     collapsed ? 'nav-item--collapsed' : ''
   }`;
 
+  // Accessibility attributes
+  const a11yProps = {
+    'aria-label': collapsed ? item.label : undefined,
+    'aria-current': item.active ? 'page' as const : undefined,
+    'aria-expanded': hasChildren ? expanded : undefined,
+    tabIndex: 0,
+  };
+
   return (
-    <li>
+    <li role="listitem">
       {item.href ? (
-        <a href={item.href} className={className}>
+        <a
+          href={item.href}
+          className={className}
+          onKeyDown={handleKeyDown}
+          {...a11yProps}
+        >
           {content}
         </a>
       ) : (
-        <button className={className} onClick={handleClick}>
+        <button
+          className={className}
+          onClick={handleClick}
+          onKeyDown={handleKeyDown}
+          {...a11yProps}
+        >
           {content}
         </button>
       )}
 
       {/* Nested items */}
       {hasChildren && expanded && !collapsed && (
-        <ul className="nav-list nav-list--nested">
+        <ul className="nav-list nav-list--nested" role="list">
           {item.children!.map((child) => (
             <NavItemComponent key={child.id} item={child} collapsed={collapsed} />
           ))}

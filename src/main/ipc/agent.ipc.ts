@@ -30,7 +30,7 @@ import {
 export function registerAgentHandlers(): void {
   // Detect which agents should be triggered for given context
   registerHandler('agent:detectTriggers', async (_event, request) => {
-    const { operation, location, layers, issues, securitySensitive, externalApi } = request as {
+    const { operation, location, layers, issues, securitySensitive, externalApi } = request as unknown as {
       operation: string;
       location: string[];
       layers: ('ui' | 'ipc' | 'db' | 'core' | 'service')[];
@@ -79,7 +79,7 @@ export function registerAgentHandlers(): void {
 
   // Register a development bottleneck
   registerHandler('agent:registerBottleneck', async (_event, request) => {
-    const { type, location, blockedBy, proposedFix, affectedAgents, severity } = request as {
+    const { type, location, blockedBy, proposedFix, affectedAgents, severity } = request as unknown as {
       type: BottleneckType;
       location: string;
       blockedBy: string;
@@ -158,19 +158,25 @@ export function registerAgentHandlers(): void {
 
   // Resolve (remove) a bottleneck
   registerHandler('agent:resolveBottleneck', async (_event, request) => {
-    const { index } = request as { index: number };
+    const { id } = request as unknown as { id: string; resolution: string };
 
-    if (typeof index !== 'number' || index < 0) {
-      return error('index must be a non-negative number');
+    if (!id) {
+      return error('id is required');
     }
 
     try {
       const service = getAgentTriggerService();
-      service.resolveBottleneck(index);
+      const bottlenecks = service.getActiveBottlenecks();
+      const index = bottlenecks.findIndex((b: DevelopmentBottleneck) =>
+        `${b.type}-${b.location}` === id || b.location === id
+      );
+
+      if (index >= 0) {
+        service.resolveBottleneck(index);
+      }
 
       return success({
-        resolved: true,
-        remainingCount: service.getActiveBottlenecks().length,
+        resolved: index >= 0,
       });
     } catch (err) {
       console.error('Failed to resolve bottleneck:', err);
@@ -201,28 +207,29 @@ export function registerAgentHandlers(): void {
 
   // Generate agent specification (for meta-agent-builder)
   registerHandler('agent:generateSpec', async (_event, request) => {
-    const { bottleneckIndex } = request as { bottleneckIndex: number };
+    const { bottleneckId } = request as { bottleneckId: string };
 
-    if (typeof bottleneckIndex !== 'number' || bottleneckIndex < 0) {
-      return error('bottleneckIndex must be a non-negative number');
+    if (!bottleneckId || typeof bottleneckId !== 'string') {
+      return error('bottleneckId must be a non-empty string');
     }
 
     try {
       const service = getAgentTriggerService();
       const bottlenecks = service.getActiveBottlenecks();
 
-      if (bottleneckIndex >= bottlenecks.length) {
-        return error('Bottleneck index out of range');
+      // Find bottleneck by ID (format: type-location or just location)
+      const bottleneck = bottlenecks.find((b: DevelopmentBottleneck) =>
+        `${b.type}-${b.location}` === bottleneckId || b.location === bottleneckId
+      );
+
+      if (!bottleneck) {
+        return error('Bottleneck not found');
       }
 
-      const spec = service.generateAgentSpec(bottlenecks[bottleneckIndex]);
+      const spec = service.generateAgentSpec(bottleneck);
 
       return success({
         spec,
-        bottleneck: {
-          type: bottlenecks[bottleneckIndex].type,
-          location: bottlenecks[bottleneckIndex].location,
-        },
       });
     } catch (err) {
       console.error('Failed to generate agent spec:', err);

@@ -177,6 +177,91 @@ export function estimateThetaMLE(
 }
 
 /**
+ * Estimates theta using MLE with 3PL model support.
+ *
+ * The 3PL model accounts for guessing, which is important for MCQ items.
+ * Uses modified Newton-Raphson that accounts for the guessing parameter.
+ *
+ * @param responses - Array of response outcomes (true = correct, false = incorrect)
+ * @param items - Array of item parameters (must include c for guessing)
+ * @returns Object containing estimated theta and standard error
+ *
+ * @example
+ * ```typescript
+ * const responses = [true, false, true, true];
+ * const items = [
+ *   { id: '1', a: 1.2, b: -1.0, c: 0.25 },  // MCQ with 4 options
+ *   { id: '2', a: 1.0, b: 0.0, c: 0.25 },
+ *   { id: '3', a: 1.5, b: 0.5, c: 0.20 },   // MCQ with 5 options
+ *   { id: '4', a: 1.0, b: 1.0, c: 0.25 },
+ * ];
+ * const result = estimateThetaMLE3PL(responses, items);
+ * ```
+ */
+export function estimateThetaMLE3PL(
+  responses: boolean[],
+  items: Array<ItemParameter & { c?: number }>
+): ThetaEstimate {
+  let theta = 0;
+  const MAX_ITER = 50;
+  const TOLERANCE = 0.001;
+
+  for (let iter = 0; iter < MAX_ITER; iter++) {
+    let L1 = 0; // First derivative
+    let L2 = 0; // Second derivative
+
+    for (let i = 0; i < responses.length; i++) {
+      const { a, b, c = 0 } = items[i];
+      const p = probability3PL(theta, a, b, c);
+      const q = 1 - p;
+      const u = responses[i] ? 1 : 0;
+
+      // For 3PL, the derivatives are more complex
+      // p* is the 2PL component: 1/(1 + exp(-a(theta-b)))
+      const pStar = probability2PL(theta, a, b);
+      const qStar = 1 - pStar;
+
+      // First derivative: a * pStar * (1-c) * (u - p) / (p * (1-c))
+      // Simplified: a * pStar * qStar * (u - p) / (p * q) when p > c
+      if (p > 0.001 && q > 0.001) {
+        const W = (1 - c) * pStar * qStar;
+        L1 += a * W * (u - p) / (p * q);
+        L2 -= a * a * W * W / (p * q);
+      }
+    }
+
+    if (L2 === 0) break;
+
+    const delta = L1 / L2;
+    theta -= delta;
+
+    // Bound theta to reasonable range
+    theta = Math.max(-4, Math.min(4, theta));
+
+    if (Math.abs(delta) < TOLERANCE) break;
+  }
+
+  // Fisher Information for 3PL
+  const fisherInfo = items.reduce((sum, item) => {
+    const { a, b, c = 0 } = item;
+    const p = probability3PL(theta, a, b, c);
+    const pStar = probability2PL(theta, a, b);
+    const qStar = 1 - pStar;
+
+    if (p > 0.001 && (1 - p) > 0.001) {
+      const W = (1 - c) * pStar * qStar;
+      return sum + (a * a * W * W) / (p * (1 - p));
+    }
+    return sum;
+  }, 0);
+
+  return {
+    theta,
+    se: fisherInfo > 0 ? 1 / Math.sqrt(fisherInfo) : Infinity
+  };
+}
+
+/**
  * Estimates theta using Expected A Posteriori (EAP) with Gaussian quadrature.
  *
  * EAP is a Bayesian approach that incorporates a prior distribution on theta.

@@ -131,36 +131,40 @@ export async function endSession(sessionId: string): Promise<Session> {
 
 /**
  * Record a response within a session.
+ * Uses a transaction to ensure atomicity of response creation and session update.
  */
 export async function recordResponse(input: RecordResponseInput): Promise<Response> {
   const db = getPrisma();
 
-  // Create the response
-  const response = await db.response.create({
-    data: {
-      sessionId: input.sessionId,
-      objectId: input.objectId,
-      taskType: input.taskType,
-      taskFormat: input.taskFormat,
-      modality: input.modality,
-      correct: input.correct,
-      responseTimeMs: input.responseTimeMs,
-      cueLevel: input.cueLevel,
-      responseContent: input.responseContent,
-      expectedContent: input.expectedContent,
-      irtThetaContribution: input.irtThetaContribution,
-    },
-  });
+  // Use transaction to ensure atomicity
+  return db.$transaction(async (tx) => {
+    // Create the response
+    const response = await tx.response.create({
+      data: {
+        sessionId: input.sessionId,
+        objectId: input.objectId,
+        taskType: input.taskType,
+        taskFormat: input.taskFormat,
+        modality: input.modality,
+        correct: input.correct,
+        responseTimeMs: input.responseTimeMs,
+        cueLevel: input.cueLevel,
+        responseContent: input.responseContent,
+        expectedContent: input.expectedContent,
+        irtThetaContribution: input.irtThetaContribution,
+      },
+    });
 
-  // Update session metrics
-  await db.session.update({
-    where: { id: input.sessionId },
-    data: {
-      itemsPracticed: { increment: 1 },
-    },
-  });
+    // Update session metrics
+    await tx.session.update({
+      where: { id: input.sessionId },
+      data: {
+        itemsPracticed: { increment: 1 },
+      },
+    });
 
-  return response;
+    return response;
+  });
 }
 
 /**

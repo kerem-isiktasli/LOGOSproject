@@ -54,7 +54,7 @@ export {
   type FSRSParameters,
   type MasteryStage,
   type MasteryState,
-  type ResponseData as FSRSResponseData,
+  type FSRSResponseData,
   // Constants
   DEFAULT_WEIGHTS,
   DEFAULT_PARAMETERS,

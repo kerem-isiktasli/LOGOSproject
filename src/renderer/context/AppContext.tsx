@@ -39,7 +39,7 @@ interface AppState {
 
   // Actions
   setActiveGoal: (goalId: string | null) => void;
-  refreshGoals: () => void;
+  refreshGoals: () => Promise<void>;
   toggleSidebar: () => void;
   toggleFocusMode: () => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
@@ -56,7 +56,7 @@ const defaultState: AppState = {
   focusMode: false,
   theme: 'system',
   setActiveGoal: () => {},
-  refreshGoals: () => {},
+  refreshGoals: async () => {},
   toggleSidebar: () => {},
   toggleFocusMode: () => {},
   setTheme: () => {},

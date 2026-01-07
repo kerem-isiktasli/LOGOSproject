@@ -132,7 +132,7 @@ export function registerHandler<TChannel extends keyof IPCHandlerMap>(
   handler: (
     event: IpcMainInvokeEvent,
     request: IPCHandlerMap[TChannel]['request']
-  ) => Promise<IPCResponse<IPCHandlerMap[TChannel]['response']>>
+  ) => Promise<IPCResponse<IPCHandlerMap[TChannel]['response']> | IPCResponse<unknown>>
 ): void {
   ipcMain.handle(channel, async (event, request) => {
     try {

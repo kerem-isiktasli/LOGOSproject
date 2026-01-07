@@ -3,12 +3,81 @@
  *
  * Type-safe React hooks for accessing the LOGOS IPC API.
  * Provides reactive data fetching and mutations.
+ *
+ * Features:
+ * - Automatic retry with exponential backoff for network errors
+ * - Error categorization (network, validation, server)
+ * - Loading state management
+ * - Refetch capability
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 // Get the LOGOS API from window (exposed by preload)
 const logos = typeof window !== 'undefined' ? (window as any).logos : null;
+
+// ============================================================================
+// Error Types and Utilities
+// ============================================================================
+
+export type ErrorType = 'network' | 'validation' | 'server' | 'unknown';
+
+export interface LogosError {
+  type: ErrorType;
+  message: string;
+  code?: string;
+  retryable: boolean;
+  originalError?: Error;
+}
+
+export function categorizeError(err: unknown): LogosError {
+  if (err instanceof Error) {
+    const message = err.message.toLowerCase();
+
+    // Network errors
+    if (message.includes('network') || message.includes('fetch') || message.includes('timeout') || message.includes('offline')) {
+      return {
+        type: 'network',
+        message: '네트워크 연결을 확인해주세요.',
+        retryable: true,
+        originalError: err,
+      };
+    }
+
+    // Validation errors
+    if (message.includes('validation') || message.includes('invalid') || message.includes('required')) {
+      return {
+        type: 'validation',
+        message: err.message,
+        retryable: false,
+        originalError: err,
+      };
+    }
+
+    // Server errors
+    if (message.includes('500') || message.includes('server') || message.includes('internal')) {
+      return {
+        type: 'server',
+        message: '서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요.',
+        retryable: true,
+        originalError: err,
+      };
+    }
+
+    return {
+      type: 'unknown',
+      message: err.message,
+      retryable: false,
+      originalError: err,
+    };
+  }
+
+  return {
+    type: 'unknown',
+    message: String(err),
+    retryable: false,
+  };
+}
 
 // ============================================================================
 // Generic Hook Helpers
@@ -17,25 +86,58 @@ const logos = typeof window !== 'undefined' ? (window as any).logos : null;
 interface AsyncState<T> {
   data: T | null;
   loading: boolean;
-  error: string | null;
+  error: LogosError | null;
 }
 
-function useAsync<T>(asyncFn: () => Promise<T>, deps: any[] = []): AsyncState<T> & { refetch: () => void } {
-  const [state, setState] = useState<AsyncState<T>>({ data: null, loading: true, error: null });
+interface UseAsyncOptions {
+  retryCount?: number;
+  retryDelay?: number;
+  onError?: (error: LogosError) => void;
+}
 
-  const execute = useCallback(async () => {
+function useAsync<T>(
+  asyncFn: () => Promise<T>,
+  deps: any[] = [],
+  options: UseAsyncOptions = {}
+): AsyncState<T> & { refetch: () => Promise<void>; retry: () => Promise<void> } {
+  const [state, setState] = useState<AsyncState<T>>({ data: null, loading: true, error: null });
+  const retryCountRef = useRef(0);
+  const { retryCount = 3, retryDelay = 1000, onError } = options;
+
+  const execute = useCallback(async (isRetry = false) => {
+    if (!isRetry) {
+      retryCountRef.current = 0;
+    }
     setState(prev => ({ ...prev, loading: true, error: null }));
+
     try {
       const data = await asyncFn();
       setState({ data, loading: false, error: null });
+      retryCountRef.current = 0;
     } catch (err) {
-      setState({ data: null, loading: false, error: err instanceof Error ? err.message : 'Unknown error' });
+      const logosError = categorizeError(err);
+
+      // Auto-retry for retryable errors
+      if (logosError.retryable && retryCountRef.current < retryCount) {
+        retryCountRef.current++;
+        const delay = retryDelay * Math.pow(2, retryCountRef.current - 1);
+        setTimeout(() => execute(true), delay);
+        return;
+      }
+
+      setState({ data: null, loading: false, error: logosError });
+      onError?.(logosError);
     }
   }, deps);
 
+  const retry = useCallback(async () => {
+    retryCountRef.current = 0;
+    await execute(false);
+  }, [execute]);
+
   useEffect(() => { execute(); }, [execute]);
 
-  return { ...state, refetch: execute };
+  return { ...state, refetch: execute, retry };
 }
 
 // ============================================================================
@@ -55,11 +157,12 @@ export function useCreateGoal() {
   const [error, setError] = useState<string | null>(null);
 
   const createGoal = useCallback(async (data: {
-    name: string;
-    targetLanguage: string;
-    nativeLanguage: string;
-    description?: string;
-    targetLevel?: number;
+    domain: string;
+    modality: string[];
+    genre: string;
+    purpose: string;
+    benchmark?: string;
+    deadline?: string;
   }) => {
     setLoading(true);
     setError(null);

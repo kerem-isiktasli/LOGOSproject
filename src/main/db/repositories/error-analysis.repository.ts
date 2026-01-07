@@ -379,8 +379,18 @@ export async function recalculateComponentStats(
     const olderErrors = totalErrors - recentErrors;
 
     // Calculate error rate
+    // Map component codes to object types (PHON -> phoneme, MORPH -> morpheme, etc.)
+    const componentToType: Record<string, string> = {
+      PHON: 'phoneme',
+      MORPH: 'morpheme',
+      LEX: 'lexeme',
+      SYN: 'syntax',
+      PRAG: 'pragmatic',
+      COLL: 'collocation',
+    };
+    const targetType = componentToType[component] || component.toLowerCase();
     const totalForComponent = responses.filter(
-      (r) => r.object.type === component.substring(0, 3)
+      (r) => r.object.type === targetType
     ).length;
     const errorRate = totalForComponent > 0 ? totalErrors / totalForComponent : 0;
 

@@ -5,10 +5,25 @@
  * Learning objects are the atomic units of learning (words, phrases, grammar).
  */
 
-import { registerHandler, success, error, validateNonEmpty, validateUUID } from './contracts';
+import { registerHandler, success, error, validateUUID } from './contracts';
 import { prisma } from '../db/client';
+import {
+  validateInput,
+  QueueGetSchema,
+  ObjectCreateSchema,
+  ObjectUpdateSchema,
+  ObjectListSchema,
+  ObjectImportSchema,
+  ObjectSearchSchema,
+} from '../../shared/schemas/ipc-schemas';
 import { buildLearningQueue, getSessionItems, inferLevel, getWeightsForLevel } from '../../core/priority';
 import type { LanguageObject, UserState, MasteryInfo, QueueItem } from '../../core/priority';
+import {
+  getOrGenerateTaskWithMatching,
+  type GeneratedTask,
+  type EnhancedTaskGenerationConfig,
+} from '../services/task-generation.service';
+import type { LearningQueueItem } from '../services/state-priority.service';
 
 // ============================================================================
 // Handler Registration
@@ -20,34 +35,12 @@ import type { LanguageObject, UserState, MasteryInfo, QueueItem } from '../../co
 export function registerLearningHandlers(): void {
   // Create a learning object
   registerHandler('object:create', async (_event, request) => {
-    const {
-      goalId,
-      content,
-      type,
-      frequency,
-      relationalDensity,
-      contextualContribution,
-      irtDifficulty,
-      metadata
-    } = request as {
-      goalId: string;
-      content: string;
-      type: string;
-      frequency?: number;
-      relationalDensity?: number;
-      contextualContribution?: number;
-      irtDifficulty?: number;
-      metadata?: Record<string, unknown>;
-    };
+    const validation = validateInput(ObjectCreateSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
+    }
 
-    const goalError = validateUUID(goalId, 'goalId');
-    if (goalError) return error(goalError);
-
-    const contentError = validateNonEmpty(content, 'content');
-    if (contentError) return error(contentError);
-
-    const typeError = validateNonEmpty(type, 'type');
-    if (typeError) return error(typeError);
+    const { goalId, content, type, frequency, relationalDensity, contextualContribution, irtDifficulty, metadata } = validation.data;
 
     try {
       const object = await prisma.languageObject.create({
@@ -96,15 +89,12 @@ export function registerLearningHandlers(): void {
 
   // List learning objects for a goal
   registerHandler('object:list', async (_event, request) => {
-    const { goalId, type, limit, offset } = request as {
-      goalId: string;
-      type?: string;
-      limit?: number;
-      offset?: number;
-    };
+    const validation = validateInput(ObjectListSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
+    }
 
-    const goalError = validateUUID(goalId, 'goalId');
-    if (goalError) return error(goalError);
+    const { goalId, type, limit, offset } = validation.data;
 
     try {
       const objects = await prisma.languageObject.findMany({
@@ -113,8 +103,8 @@ export function registerLearningHandlers(): void {
           ...(type ? { type } : {}),
         },
         include: { masteryState: true },
-        take: limit || 100,
-        skip: offset || 0,
+        take: limit,
+        skip: offset,
         orderBy: { createdAt: 'desc' },
       });
 
@@ -127,45 +117,21 @@ export function registerLearningHandlers(): void {
 
   // Update a learning object
   registerHandler('object:update', async (_event, request) => {
-    const {
-      id,
-      content,
-      translation,
-      frequency,
-      relationalDensity,
-      contextualContribution,
-      irtDifficulty,
-      metadata
-    } = request as {
-      id: string;
-      content?: string;
-      translation?: string;
-      frequency?: number;
-      relationalDensity?: number;
-      contextualContribution?: number;
-      irtDifficulty?: number;
-      metadata?: Record<string, unknown>;
-    };
+    const validation = validateInput(ObjectUpdateSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
+    }
 
-    const idError = validateUUID(id, 'id');
-    if (idError) return error(idError);
+    const { id, content, translation, frequency, relationalDensity, contextualContribution, irtDifficulty, metadata } = validation.data;
 
     const updateData: Record<string, unknown> = {};
-    if (content !== undefined) {
-      const contentError = validateNonEmpty(content, 'content');
-      if (contentError) return error(contentError);
-      updateData.content = content.trim();
-    }
+    if (content !== undefined) updateData.content = content.trim();
     if (translation !== undefined) updateData.translation = translation?.trim() || null;
     if (frequency !== undefined) updateData.frequency = frequency;
     if (relationalDensity !== undefined) updateData.relationalDensity = relationalDensity;
     if (contextualContribution !== undefined) updateData.contextualContribution = contextualContribution;
     if (irtDifficulty !== undefined) updateData.irtDifficulty = irtDifficulty;
     if (metadata !== undefined) updateData.metadata = JSON.stringify(metadata);
-
-    if (Object.keys(updateData).length === 0) {
-      return error('No fields to update');
-    }
 
     try {
       const object = await prisma.languageObject.update({
@@ -201,25 +167,12 @@ export function registerLearningHandlers(): void {
 
   // Bulk import learning objects
   registerHandler('object:import', async (_event, request) => {
-    const { goalId, objects } = request as {
-      goalId: string;
-      objects: Array<{
-        content: string;
-        type: string;
-        translation?: string;
-        frequency?: number;
-        relationalDensity?: number;
-        contextualContribution?: number;
-        irtDifficulty?: number;
-      }>;
-    };
-
-    const goalError = validateUUID(goalId, 'goalId');
-    if (goalError) return error(goalError);
-
-    if (!Array.isArray(objects) || objects.length === 0) {
-      return error('objects must be a non-empty array');
+    const validation = validateInput(ObjectImportSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
     }
+
+    const { goalId, objects } = validation.data;
 
     try {
       const created = await prisma.languageObject.createMany({
@@ -243,14 +196,12 @@ export function registerLearningHandlers(): void {
 
   // Get learning queue
   registerHandler('queue:get', async (_event, request) => {
-    const { goalId, sessionSize, newItemRatio } = request as {
-      goalId: string;
-      sessionSize?: number;
-      newItemRatio?: number;
-    };
+    const validation = validateInput(QueueGetSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
+    }
 
-    const goalError = validateUUID(goalId, 'goalId');
-    if (goalError) return error(goalError);
+    const { goalId, sessionSize, newItemRatio } = validation.data;
 
     try {
       // Get user profile for theta
@@ -296,9 +247,66 @@ export function registerLearningHandlers(): void {
 
       // Build and get session items
       const queue = buildLearningQueue(languageObjects, userState, masteryMap, new Date());
-      const sessionItems = getSessionItems(queue, sessionSize ?? 20, newItemRatio ?? 0.3);
+      const sessionItems = getSessionItems(queue, sessionSize, newItemRatio);
 
-      return success(sessionItems.map(mapQueueItemToResponse));
+      // Get goal domain for task matching
+      const goal = await prisma.goalSpec.findUnique({
+        where: { id: goalId },
+        select: { domain: true },
+      });
+
+      // Generate tasks for each queue item using z(w) vector matching
+      // Reference: Nation (2001) - vocabulary learning depth, Lu (2010) - syntactic complexity
+      const config: EnhancedTaskGenerationConfig = {
+        fluencyRatio: 0.3,
+        useTaskMatching: true,  // Enable z(w) vector-based task selection
+        focusDomain: goal?.domain,
+      };
+
+      const tasksWithItems = await Promise.all(
+        sessionItems.map(async (item) => {
+          try {
+            // Convert QueueItem to LearningQueueItem format
+            const learningItem: LearningQueueItem = {
+              objectId: item.object.id,
+              content: item.object.content,
+              type: item.object.type,
+              priority: item.priority,
+              stage: item.masteryInfo?.stage ?? 0,
+              nextReview: item.masteryInfo?.nextReview ?? null,
+              cueFreeAccuracy: item.masteryInfo?.cueFreeAccuracy ?? 0,
+              scaffoldingGap: 0, // Will be calculated if needed
+              isBottleneck: false,
+              urgencyScore: item.urgency,
+            };
+
+            const task = await getOrGenerateTaskWithMatching(learningItem, config);
+            return {
+              ...mapQueueItemToResponse(item),
+              task: {
+                prompt: task.prompt,
+                options: task.options,
+                hints: task.hints,
+                expectedAnswer: task.expectedAnswer,
+                format: task.spec.format,
+                difficulty: task.spec.difficulty,
+                cueLevel: task.spec.cueLevel,
+                modality: task.spec.modality,
+                isFluencyTask: task.spec.isFluencyTask,
+              },
+            };
+          } catch (err) {
+            console.error(`Failed to generate task for ${item.object.id}:`, err);
+            // Return item without task on error
+            return {
+              ...mapQueueItemToResponse(item),
+              task: null,
+            };
+          }
+        })
+      );
+
+      return success(tasksWithItems);
     } catch (err) {
       console.error('Failed to build queue:', err);
       return error('Failed to build learning queue');
@@ -307,15 +315,12 @@ export function registerLearningHandlers(): void {
 
   // Search language objects
   registerHandler('object:search', async (_event, request) => {
-    const { goalId, query, type, limit } = request as {
-      goalId: string;
-      query?: string;
-      type?: string;
-      limit?: number;
-    };
+    const validation = validateInput(ObjectSearchSchema, request);
+    if (!validation.success) {
+      return error(validation.error);
+    }
 
-    const goalError = validateUUID(goalId, 'goalId');
-    if (goalError) return error(goalError);
+    const { goalId, query, type, limit } = validation.data;
 
     try {
       const objects = await prisma.languageObject.findMany({
@@ -325,7 +330,7 @@ export function registerLearningHandlers(): void {
           ...(type ? { type } : {}),
         },
         include: { masteryState: true },
-        take: limit || 50,
+        take: limit,
         orderBy: { priority: 'desc' },
       });
 

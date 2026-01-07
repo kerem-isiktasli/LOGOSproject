@@ -4,10 +4,11 @@
  * Goal management page for creating and viewing learning goals.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useApp } from '../context';
 import { useGoals, useCreateGoal, useDeleteGoal } from '../hooks';
-import { GoalCard, CreateGoalForm } from '../components/goal';
+import { GoalCard, CreateGoalForm, type CreateGoalFormData } from '../components/goal';
 import { GlassCard, GlassButton } from '../components/ui';
 
 interface GoalsPageProps {
@@ -21,20 +22,31 @@ export const GoalsPage: React.FC<GoalsPageProps> = ({
 }) => {
   const { activeGoalId, setActiveGoal, refreshGoals } = useApp();
   const { data: goals, loading: goalsLoading } = useGoals();
-  const { execute: createGoal, loading: creating } = useCreateGoal();
-  const { execute: deleteGoal } = useDeleteGoal();
+  const { createGoal, loading: creating } = useCreateGoal();
+  const { deleteGoal } = useDeleteGoal();
 
   const [showCreateForm, setShowCreateForm] = useState(false);
+  const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
 
-  // Handle goal creation
-  const handleCreateGoal = async (data: {
-    name: string;
-    targetLanguage: string;
-    nativeLanguage: string;
-    description?: string;
-  }) => {
+  // Set portal container after mount
+  useEffect(() => {
+    setPortalContainer(document.body);
+  }, []);
+
+  // Handle goal creation - accepts CreateGoalFormData from the form
+  const handleCreateGoal = async (data: CreateGoalFormData) => {
     try {
-      const newGoal = await createGoal(data);
+      // Pass data directly to API (domain, modality, genre, purpose are required)
+      const goalData = {
+        domain: data.domain,
+        modality: data.modality,
+        genre: data.genre,
+        purpose: data.purpose,
+        benchmark: data.benchmark,
+        deadline: data.deadline,
+      };
+
+      const newGoal = await createGoal(goalData);
       setShowCreateForm(false);
       refreshGoals();
 
@@ -61,7 +73,7 @@ export const GoalsPage: React.FC<GoalsPageProps> = ({
     }
 
     try {
-      await deleteGoal({ id: goalId });
+      await deleteGoal(goalId);
       refreshGoals();
 
       // Clear active goal if deleted
@@ -105,17 +117,46 @@ export const GoalsPage: React.FC<GoalsPageProps> = ({
         </div>
       </div>
 
-      {/* Create Form Modal */}
-      {showCreateForm && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="max-w-lg w-full">
+      {/* Create Form Modal - Using Portal to render at body level */}
+      {showCreateForm && portalContainer && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+            zIndex: 9999,
+          }}
+          onClick={(e) => e.target === e.currentTarget && setShowCreateForm(false)}
+        >
+          <div
+            style={{
+              maxWidth: '32rem',
+              width: '100%',
+              maxHeight: '90vh',
+              overflowY: 'auto',
+              backgroundColor: '#1e293b',
+              borderRadius: '0.75rem',
+              padding: '1.5rem',
+            }}
+          >
+            <h2 style={{ fontSize: '1.25rem', fontWeight: 'bold', color: 'white', marginBottom: '1rem' }}>
+              Create New Goal
+            </h2>
             <CreateGoalForm
               onSubmit={handleCreateGoal}
               onCancel={() => setShowCreateForm(false)}
               loading={creating}
             />
           </div>
-        </div>
+        </div>,
+        portalContainer
       )}
 
       {/* Goals List */}

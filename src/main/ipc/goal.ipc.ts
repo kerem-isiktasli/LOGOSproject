@@ -526,12 +526,14 @@ export function registerGoalHandlers(): void {
 
       for (const item of result.items) {
         try {
+          // Generate a proper UUID for the language object
+          const objectId = crypto.randomUUID();
           await db.languageObject.upsert({
             where: {
-              id: `${goalId}-${item.content}`.substring(0, 36),
+              goalId_content: { goalId, content: item.content },
             },
             create: {
-              id: `${goalId}-${item.content}`.substring(0, 36),
+              id: objectId,
               goalId,
               content: item.content,
               type: item.type,

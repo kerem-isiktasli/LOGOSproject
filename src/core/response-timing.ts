@@ -179,6 +179,8 @@ const TYPE_TO_CATEGORY: Record<TaskType, TaskCategory> = {
   collocation: 'recall',
   word_formation: 'production',
   register_shift: 'production',
+  sentence_combining: 'production',
+  clause_selection: 'recall',
 };
 
 // =============================================================================

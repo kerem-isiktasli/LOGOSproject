@@ -305,7 +305,7 @@ export function createComponentObjectState(
 
     exposureHistory: {
       totalExposures: 0,
-      byModality: { visual: 0, auditory: 0, mixed: 0 },
+      byModality: { visual: 0, auditory: 0, mixed: 0, text: 0, audio: 0 },
       byTaskPhase: { learning: 0, training: 0, evaluation: 0 },
       lastExposure: null,
       exposurePattern: [],

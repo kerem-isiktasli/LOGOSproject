@@ -14,15 +14,39 @@
  * not just the highest error rate.
  */
 
+import type { ComponentType } from './types';
+
 // ============================================================================
 // Types
 // ============================================================================
 
+// Re-export ComponentType for consumers of this module
+export type { ComponentType };
+
 /**
- * Language component types in cascade order.
- * Earlier components can cause errors in later components.
+ * Short-form component type used internally by bottleneck detection.
+ * Maps to the canonical ComponentType from types.ts.
  */
-export type ComponentType = 'PHON' | 'MORPH' | 'LEX' | 'SYNT' | 'PRAG';
+type ShortComponentType = 'PHON' | 'MORPH' | 'LEX' | 'SYNT' | 'PRAG';
+
+/**
+ * Normalize any ComponentType to its short form.
+ */
+function toShortForm(type: ComponentType): ShortComponentType {
+  const mapping: Record<string, ShortComponentType> = {
+    'PHON': 'PHON',
+    'MORPH': 'MORPH',
+    'LEX': 'LEX',
+    'SYNT': 'SYNT',
+    'PRAG': 'PRAG',
+    'phonological': 'PHON',
+    'morphological': 'MORPH',
+    'lexical': 'LEX',
+    'syntactic': 'SYNT',
+    'pragmatic': 'PRAG',
+  };
+  return mapping[type] || 'LEX'; // Default fallback
+}
 
 /**
  * Evidence for a bottleneck in a specific component.
@@ -110,7 +134,7 @@ export const CASCADE_ORDER: ComponentType[] = ['PHON', 'MORPH', 'LEX', 'SYNT', '
 /**
  * Human-readable component names for recommendations.
  */
-const COMPONENT_NAMES: Record<ComponentType, string> = {
+const COMPONENT_NAMES: Record<ShortComponentType, string> = {
   'PHON': 'Phonology (sounds and pronunciation)',
   'MORPH': 'Morphology (word forms and structure)',
   'LEX': 'Vocabulary (word meanings)',
@@ -121,7 +145,7 @@ const COMPONENT_NAMES: Record<ComponentType, string> = {
 /**
  * Short component descriptions for patterns.
  */
-const COMPONENT_SHORT: Record<ComponentType, string> = {
+const COMPONENT_SHORT: Record<ShortComponentType, string> = {
   'PHON': 'pronunciation',
   'MORPH': 'word forms',
   'LEX': 'vocabulary',
@@ -487,14 +511,14 @@ function generateRecommendation(
 
   const ev = evidence.find(e => e.componentType === bottleneck);
   const errorRate = ev ? Math.round(ev.errorRate * 100) : 0;
-  const componentName = COMPONENT_NAMES[bottleneck];
+  const componentName = COMPONENT_NAMES[toShortForm(bottleneck)];
 
   let recommendation = `Focus on ${componentName} (${errorRate}% error rate). `;
 
   // Add cascade information
   if (cascade.rootCause === bottleneck && cascade.cascadeChain.length > 1) {
     const downstream = cascade.cascadeChain.slice(1)
-      .map(t => COMPONENT_SHORT[t])
+      .map(t => COMPONENT_SHORT[toShortForm(t)])
       .join(', ');
     recommendation += `Improving this will also help with ${downstream}. `;
   }
@@ -605,9 +629,9 @@ export function summarizeBottleneck(analysis: BottleneckAnalysis): string {
   );
 
   if (!ev) {
-    return `Bottleneck: ${COMPONENT_SHORT[analysis.primaryBottleneck]}`;
+    return `Bottleneck: ${COMPONENT_SHORT[toShortForm(analysis.primaryBottleneck)]}`;
   }
 
   const percent = Math.round(ev.errorRate * 100);
-  return `${COMPONENT_SHORT[analysis.primaryBottleneck]} (${percent}% errors)`;
+  return `${COMPONENT_SHORT[toShortForm(analysis.primaryBottleneck)]} (${percent}% errors)`;
 }

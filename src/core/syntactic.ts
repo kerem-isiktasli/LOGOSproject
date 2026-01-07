@@ -219,13 +219,13 @@ const SUBORDINATORS: Record<string, SubordinateClauseType> = {
   'if': 'conditional', 'unless': 'conditional', 'provided': 'conditional',
   'providing': 'conditional', 'supposing': 'conditional',
 
-  // Causal
-  'because': 'causal', 'since': 'causal', 'as': 'causal',
+  // Causal (note: 'since' can be temporal or causal - keeping as temporal above)
+  'because': 'causal', 'as': 'causal',
   'for': 'causal', 'due to': 'causal',
 
-  // Concessive
+  // Concessive (note: 'while' can be temporal or concessive - keeping as temporal above)
   'although': 'concessive', 'though': 'concessive', 'even though': 'concessive',
-  'whereas': 'concessive', 'while': 'concessive', 'even if': 'concessive',
+  'whereas': 'concessive', 'even if': 'concessive',
 
   // Purpose
   'so that': 'purpose', 'in order that': 'purpose', 'so': 'purpose',

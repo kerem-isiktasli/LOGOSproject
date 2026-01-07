@@ -10,6 +10,12 @@ import * as path from 'path';
 import { registerAllHandlers } from './ipc';
 import { initDatabase } from './db/client';
 
+// Set DATABASE_URL for production if not already set
+if (!process.env.DATABASE_URL) {
+  const userDataPath = app.getPath('userData');
+  process.env.DATABASE_URL = `file:${path.join(userDataPath, 'logos.db')}`;
+}
+
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
 // Note: electron-squirrel-startup is only needed for Squirrel-based installers
 // We use NSIS, so this is wrapped in try-catch for compatibility
@@ -42,7 +48,7 @@ async function createWindow(): Promise<void> {
     trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: '#f8fafc',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: path.join(__dirname, '../preload/preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: false, // Disabled for preload script compatibility
@@ -51,7 +57,7 @@ async function createWindow(): Promise<void> {
 
   // Load the app
   if (isDev) {
-    mainWindow.loadURL('http://localhost:3000');
+    mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
