@@ -21,7 +21,10 @@ import {
   getPrimaryBottleneck,
   type BottleneckResult,
 } from '../db/repositories/error-analysis.repository';
-import { selectNextItem, fisherInformation, type ItemParameter } from '../../core/irt';
+import { selectNextItem, fisherInformation } from '../../core/irt';
+import type { ComponentCode, ItemParameter, GeneralizationEstimate } from '../../core/types';
+import { getBlockingComponents } from './component-prerequisite.service';
+import { estimateGeneralization } from './generalization-estimation.service';
 
 // =============================================================================
 // Types
@@ -46,6 +49,8 @@ export interface PriorityWeights {
   pragmatic: number;      // Pragmatic/register fit weight
   urgency: number;        // Review urgency weight
   bottleneck: number;     // Bottleneck boost weight
+  prerequisite: number;   // Blocking component boost weight (Processability Theory)
+  coverageGap: number;    // Usage space coverage gap weight (Generalization)
 }
 
 export interface LearningQueueItem {
@@ -74,23 +79,28 @@ export interface QueueAnalysis {
  * Default priority weights for the FRE formula.
  *
  * Weight distribution rationale (sum = 1.0):
- * - Linguistic features (F, R, D, M, P, SYNT, PRAG): 72% - core learning priority
- * - Scheduling factors (urgency, bottleneck): 28% - temporal adjustments
+ * - Linguistic features (F, R, D, M, P, SYNT, PRAG): 60% - core learning priority
+ * - Scheduling factors (urgency, bottleneck): 20% - temporal adjustments
+ * - Processability/Transfer (prerequisite, coverageGap): 20% - developmental sequencing
  *
  * References:
  * - Lu, X. (2010, 2011) for syntactic complexity weighting
  * - Nation (2006) for frequency/relational importance
+ * - Pienemann (1998, 2005) for Processability Theory
+ * - Perkins & Salomon (1992) for transfer of learning
  */
 const DEFAULT_WEIGHTS: PriorityWeights = {
-  frequency: 0.16,       // F: corpus frequency - foundation of vocabulary selection
-  relational: 0.12,      // R: hub connectivity - network centrality
-  domain: 0.12,          // D: domain relevance - goal alignment
-  morphological: 0.08,   // M: morphological productivity
-  phonological: 0.08,    // P: phonological difficulty (L1-L2 transfer)
-  syntactic: 0.08,       // SYNT: syntactic complexity (Lu L2SCA)
-  pragmatic: 0.08,       // PRAG: register/pragmatic fit
-  urgency: 0.18,         // Temporal: review scheduling priority
-  bottleneck: 0.10,      // Adaptive: error pattern boosting
+  frequency: 0.14,       // F: corpus frequency - foundation of vocabulary selection
+  relational: 0.10,      // R: hub connectivity - network centrality
+  domain: 0.10,          // D: domain relevance - goal alignment
+  morphological: 0.06,   // M: morphological productivity
+  phonological: 0.06,    // P: phonological difficulty (L1-L2 transfer)
+  syntactic: 0.07,       // SYNT: syntactic complexity (Lu L2SCA)
+  pragmatic: 0.07,       // PRAG: register/pragmatic fit
+  urgency: 0.14,         // Temporal: review scheduling priority
+  bottleneck: 0.06,      // Adaptive: error pattern boosting
+  prerequisite: 0.12,    // Processability: blocking component boost
+  coverageGap: 0.08,     // Generalization: usage space expansion priority
 };
 
 // =============================================================================
@@ -302,20 +312,47 @@ export function calculateUrgencyScore(nextReview: Date | null): number {
 /**
  * Calculate effective priority S_eff(w).
  *
- * Combines base priority with mastery adjustment, urgency, and bottleneck boost.
+ * Combines base priority with mastery adjustment, urgency, bottleneck boost,
+ * prerequisite boost (Processability Theory), and coverage gap adjustment.
  * Output is clamped to [0, 1] range for consistency with IRT scale expectations.
+ *
+ * Extended priority formula:
+ * S_eff(w) = S_base(w) × g(m) + urgency + bottleneck + prerequisite + coverageGap
+ *
+ * @param basePriority - Base priority from z(w) vector (FRE formula)
+ * @param masteryAdjustment - g(m) function output (ZPD adjustment)
+ * @param urgencyScore - Review urgency score (0-1)
+ * @param isBottleneck - Whether this object is in a bottleneck component
+ * @param prerequisiteBoost - Boost for objects that unblock higher components (0-1)
+ * @param coverageGapScore - Coverage gap for generalization expansion (0-1)
+ * @param weights - Priority weight configuration
  */
 export function calculateEffectivePriority(
   basePriority: number,
   masteryAdjustment: number,
   urgencyScore: number,
   isBottleneck: boolean,
+  prerequisiteBoost: number = 0,
+  coverageGapScore: number = 0,
   weights: PriorityWeights = DEFAULT_WEIGHTS
 ): number {
   const urgencyComponent = weights.urgency * urgencyScore;
   const bottleneckBoost = isBottleneck ? weights.bottleneck : 0;
 
-  const rawPriority = basePriority * masteryAdjustment + urgencyComponent + bottleneckBoost;
+  // Prerequisite boost: Higher for objects in blocking components
+  // Objects in components that block higher-level learning get priority
+  const prerequisiteComponent = weights.prerequisite * prerequisiteBoost;
+
+  // Coverage gap: Higher for objects with low usage space coverage
+  // Encourages expansion into new contexts for better generalization
+  const coverageGapComponent = weights.coverageGap * coverageGapScore;
+
+  const rawPriority =
+    basePriority * masteryAdjustment +
+    urgencyComponent +
+    bottleneckBoost +
+    prerequisiteComponent +
+    coverageGapComponent;
 
   // Clamp to [0, 1] range for consistency
   return Math.min(1, Math.max(0, rawPriority));
@@ -327,6 +364,14 @@ export function calculateEffectivePriority(
 
 /**
  * Recalculate priorities for all objects in a goal.
+ *
+ * Integrates:
+ * - FRE-based base priority from z(w) vector
+ * - ZPD mastery adjustment g(m)
+ * - Review urgency score
+ * - Bottleneck component boost
+ * - Prerequisite blocking boost (Processability Theory)
+ * - Usage space coverage gap (Generalization estimation)
  */
 export async function recalculatePriorities(
   userId: string,
@@ -350,6 +395,13 @@ export async function recalculatePriorities(
     bottlenecks.filter((b) => b.isBottleneck).map((b) => b.component)
   );
 
+  // Get blocking components (Processability Theory integration)
+  // Components that need stabilization to unlock higher-level learning
+  const blockingComponents = await getBlockingComponents(userId, goalId);
+  const blockingComponentMap = new Map(
+    blockingComponents.map((bc) => [bc.component, bc.automationGap])
+  );
+
   // Get all objects with mastery states
   const objects = await db.languageObject.findMany({
     where: { goalId },
@@ -357,6 +409,10 @@ export async function recalculatePriorities(
   });
 
   const updates: Array<{ objectId: string; priority: number }> = [];
+
+  // Pre-calculate generalization estimates for efficient batch processing
+  // Note: This can be expensive; consider caching for production
+  const generalizationCache = new Map<string, GeneralizationEstimate>();
 
   for (const obj of objects) {
     const basePriority = calculateBasePriority(
@@ -380,21 +436,50 @@ export async function recalculatePriorities(
       : 1.0;
 
     // Map object type to component code
-    const componentCode = {
-      LEX: 'LEX',
-      MORPH: 'MORPH',
-      G2P: 'PHON',
-      SYNT: 'SYNT',
-      PRAG: 'PRAG',
-    }[obj.type] ?? obj.type;
-
+    const componentCode = mapTypeToComponentCode(obj.type);
     const isBottleneck = bottleneckComponents.has(componentCode);
+
+    // Calculate prerequisite boost based on blocking status
+    // Objects in blocking components get higher priority to unblock higher-level learning
+    let prerequisiteBoost = 0;
+    if (blockingComponentMap.has(componentCode)) {
+      const automationGap = blockingComponentMap.get(componentCode)!;
+      // Higher automation gap = higher priority (normalized to 0-1)
+      // Objects in blocking components get 2-3x boost proportional to gap
+      prerequisiteBoost = Math.min(1, automationGap * 2);
+    }
+
+    // Calculate coverage gap for generalization-based priority
+    // Low coverage = high gap = higher priority for expansion
+    let coverageGapScore = 0;
+    try {
+      // Lazy load generalization estimate (expensive operation)
+      if (!generalizationCache.has(obj.id)) {
+        const estimate = await estimateGeneralization(
+          obj.id,
+          componentCode,
+          [] // Goal contexts would be populated from goal configuration
+        );
+        generalizationCache.set(obj.id, estimate);
+      }
+
+      const genEstimate = generalizationCache.get(obj.id);
+      if (genEstimate) {
+        // Invert coverage: low coverage = high gap score
+        coverageGapScore = Math.max(0, 1 - genEstimate.estimatedTotalCoverage);
+      }
+    } catch {
+      // If generalization fails, skip coverage gap (graceful degradation)
+      coverageGapScore = 0;
+    }
 
     const effectivePriority = calculateEffectivePriority(
       basePriority,
       masteryAdjustment,
       urgencyScore,
       isBottleneck,
+      prerequisiteBoost,
+      coverageGapScore,
       weights
     );
 
@@ -407,7 +492,28 @@ export async function recalculatePriorities(
 }
 
 /**
+ * Map object type string to ComponentCode.
+ */
+function mapTypeToComponentCode(type: string): ComponentCode {
+  const mapping: Record<string, ComponentCode> = {
+    LEX: 'LEX',
+    MORPH: 'MORPH',
+    G2P: 'PHON',
+    PHON: 'PHON',
+    SYNT: 'SYNT',
+    PRAG: 'PRAG',
+  };
+  return mapping[type] || 'LEX';
+}
+
+/**
  * Get the learning queue sorted by priority.
+ *
+ * Queue sorting considers:
+ * - Pre-calculated priority (from recalculatePriorities)
+ * - Urgency score for overdue items
+ * - Bottleneck component status
+ * - Blocking component boost (Processability Theory)
  */
 export async function getLearningQueue(
   userId: string,
@@ -425,15 +531,15 @@ export async function getLearningQueue(
     bottlenecks.filter((b) => b.isBottleneck).map((b) => b.component)
   );
 
+  // Get blocking components for prerequisite-aware sorting
+  const blockingComponents = await getBlockingComponents(userId, goalId);
+  const blockingComponentSet = new Set(
+    blockingComponents.map((bc) => bc.component)
+  );
+
   // Transform and add metadata
   const queueItems: LearningQueueItem[] = reviewItems.map((item) => {
-    const componentCode = {
-      LEX: 'LEX',
-      MORPH: 'MORPH',
-      G2P: 'PHON',
-      SYNT: 'SYNT',
-      PRAG: 'PRAG',
-    }[item.type] ?? item.type;
+    const componentCode = mapTypeToComponentCode(item.type);
 
     return {
       objectId: item.objectId,
@@ -449,10 +555,26 @@ export async function getLearningQueue(
     };
   });
 
-  // Sort by effective priority (considering urgency and bottleneck)
+  // Sort by effective priority (considering urgency, bottleneck, and blocking status)
   queueItems.sort((a, b) => {
-    const aScore = a.priority + a.urgencyScore * 0.3 + (a.isBottleneck ? 0.2 : 0);
-    const bScore = b.priority + b.urgencyScore * 0.3 + (b.isBottleneck ? 0.2 : 0);
+    const aComponent = mapTypeToComponentCode(a.type);
+    const bComponent = mapTypeToComponentCode(b.type);
+
+    // Blocking component boost (Processability Theory)
+    const aBlockingBoost = blockingComponentSet.has(aComponent) ? 0.15 : 0;
+    const bBlockingBoost = blockingComponentSet.has(bComponent) ? 0.15 : 0;
+
+    const aScore =
+      a.priority +
+      a.urgencyScore * 0.3 +
+      (a.isBottleneck ? 0.2 : 0) +
+      aBlockingBoost;
+    const bScore =
+      b.priority +
+      b.urgencyScore * 0.3 +
+      (b.isBottleneck ? 0.2 : 0) +
+      bBlockingBoost;
+
     return bScore - aScore;
   });
 

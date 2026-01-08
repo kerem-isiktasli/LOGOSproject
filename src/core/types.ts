@@ -2109,13 +2109,16 @@ export interface AnswerRange {
  */
 export interface ObjectEvaluationConfig {
   /** Object ID this config applies to */
-  objectId: string;
+  objectId?: string;
 
   /** Component type */
-  componentType: ComponentCode;
+  componentType?: ComponentCode;
 
   /** Primary evaluation mode */
   evaluationMode: EvaluationMode;
+
+  /** Score threshold for passing (0-1) */
+  threshold?: number;
 
   /** For partial_credit mode: evaluation layers */
   layers?: EvaluationLayer[];
@@ -2510,4 +2513,551 @@ export interface UsageSpaceProgress {
     targetContexts: string[];
     reason: string;
   }>;
+}
+
+// =============================================================================
+// Component Prerequisite Chain
+// =============================================================================
+
+/**
+ * Component prerequisite definition.
+ *
+ * Defines the hierarchical dependency between language components.
+ * Lower components must be automated before higher components can be
+ * effectively learned.
+ *
+ * Academic basis:
+ * - Processability Theory (Pienemann, 1998, 2005)
+ * - Skill Acquisition Theory / ACT-R (Anderson, 1982, 1993)
+ * - Levelt's Speech Production Model (1999)
+ * - Metalinguistic Development Sequence (Deacon & Kirby, 2004)
+ */
+export interface ComponentPrerequisite {
+  /** Target component */
+  component: ComponentCode;
+
+  /** Required prerequisite components */
+  prerequisites: ComponentCode[];
+
+  /**
+   * FSRS stability threshold for prerequisite automation.
+   * Prerequisites must reach this stability level before
+   * the target component can be effectively learned.
+   */
+  automationThreshold: number;
+
+  /** Academic references for this dependency */
+  academicBasis: string[];
+}
+
+/**
+ * Component prerequisite chain.
+ *
+ * Based on:
+ * - Processability Theory stages (Pienemann, 2005)
+ * - Levelt's speech production model (1999)
+ * - Metalinguistic development sequence (Deacon & Kirby, 2004)
+ */
+export const COMPONENT_PREREQUISITES: Record<ComponentCode, ComponentPrerequisite> = {
+  PHON: {
+    component: 'PHON',
+    prerequisites: [],
+    automationThreshold: 0,
+    academicBasis: [
+      'Phonological awareness as foundation (ILA Position Statement)',
+      'Levelt (1999) - phonological encoding is base layer',
+    ],
+  },
+  MORPH: {
+    component: 'MORPH',
+    prerequisites: ['PHON'],
+    automationThreshold: 0.7,
+    academicBasis: [
+      'Metalinguistic development sequence (Deacon & Kirby, 2004)',
+      'Processability Theory Stage 2 (Pienemann, 2005)',
+    ],
+  },
+  LEX: {
+    component: 'LEX',
+    prerequisites: ['PHON', 'MORPH'],
+    automationThreshold: 0.6,
+    academicBasis: [
+      'Levelt (1999) - lemma access requires phonological encoding',
+      'Morphological awareness aids vocabulary (meta-analysis, 2023)',
+    ],
+  },
+  SYNT: {
+    component: 'SYNT',
+    prerequisites: ['LEX', 'MORPH'],
+    automationThreshold: 0.7,
+    academicBasis: [
+      'Processability Theory Stage 3-4 (Pienemann, 2005)',
+      'ACT-R - proceduralized lexical access frees resources',
+    ],
+  },
+  PRAG: {
+    component: 'PRAG',
+    prerequisites: ['LEX', 'SYNT'],
+    automationThreshold: 0.8,
+    academicBasis: [
+      'Skill Acquisition Theory - freed cognitive resources (Anderson, 1993)',
+      'Processability Theory Stage 5 (Pienemann, 2005)',
+    ],
+  },
+};
+
+/**
+ * Prerequisite status for a component.
+ */
+export interface PrerequisiteStatus {
+  /** Target component being checked */
+  component: ComponentCode;
+
+  /** Whether all prerequisites are satisfied */
+  allSatisfied: boolean;
+
+  /** Per-prerequisite status */
+  prerequisites: Array<{
+    component: ComponentCode;
+    requiredThreshold: number;
+    currentAutomation: number;
+    isSatisfied: boolean;
+  }>;
+
+  /** Components blocking this one */
+  blockingComponents: ComponentCode[];
+}
+
+// =============================================================================
+// Component-Specific Usage Space Dimensions
+// =============================================================================
+
+/**
+ * Usage space dimensions for PHON (Phonology/Orthography) component.
+ *
+ * Tracks where G2P rules and phonological patterns can be applied.
+ */
+export interface PhonUsageSpaceDimensions {
+  /** Words containing this phonological pattern */
+  applicableWords: string[];
+
+  /** Position in word where pattern occurs */
+  positions: ('initial' | 'medial' | 'final')[];
+
+  /** Phonological environments (preceding/following sounds) */
+  phonologicalEnvironments: string[];
+
+  /** Modality of use */
+  modality: ('decoding' | 'encoding')[];
+}
+
+/**
+ * Usage space dimensions for MORPH (Morphology) component.
+ *
+ * Tracks where morphological rules can be applied.
+ */
+export interface MorphUsageSpaceDimensions {
+  /** Roots/stems that can combine with this morpheme */
+  combinableRoots: string[];
+
+  /** Part-of-speech transformations enabled */
+  posTransformations: Array<{
+    from: string;
+    to: string;
+  }>;
+
+  /** Semantic shift types */
+  semanticShifts: ('nominalization' | 'agentive' | 'causative' | 'adjectival' | 'adverbial')[];
+
+  /** Applicable domains */
+  domains: string[];
+}
+
+/**
+ * Usage space dimensions for LEX (Vocabulary) component.
+ *
+ * Tracks the full range of contexts where a word can be used.
+ */
+export interface LexUsageSpaceDimensions {
+  /** Collocations (words that frequently co-occur) */
+  collocations: Array<{
+    word: string;
+    pmi: number;
+    frequency: number;
+  }>;
+
+  /** Register levels where word is appropriate */
+  registers: ('informal' | 'neutral' | 'formal' | 'technical')[];
+
+  /** Domains where word is commonly used */
+  domains: string[];
+
+  /** Semantic relations */
+  semanticRelations: Array<{
+    type: 'synonym' | 'antonym' | 'hypernym' | 'hyponym' | 'meronym';
+    relatedWords: string[];
+  }>;
+
+  /** Pragmatic constraints */
+  pragmaticConstraints: {
+    appropriateContexts: string[];
+    inappropriateContexts: string[];
+  };
+}
+
+/**
+ * Usage space dimensions for SYNT (Syntax) component.
+ *
+ * Tracks where grammatical structures can be applied.
+ */
+export interface SyntUsageSpaceDimensions {
+  /** Compatible verb types */
+  verbTypes: ('transitive' | 'intransitive' | 'ditransitive' | 'copular' | 'modal')[];
+
+  /** Tense/aspect combinations */
+  tenseAspects: string[];
+
+  /** Text types (genres) */
+  textTypes: ('narrative' | 'expository' | 'argumentative' | 'descriptive' | 'instructional')[];
+
+  /** Complexity levels */
+  complexityLevels: Array<{
+    clauseType: 'simple' | 'compound' | 'complex' | 'compound-complex';
+    embeddingDepth: number;
+  }>;
+
+  /** Information structure patterns */
+  informationStructure: ('topic-comment' | 'focus-presupposition' | 'given-new')[];
+}
+
+/**
+ * Usage space dimensions for PRAG (Pragmatics) component.
+ *
+ * Tracks where pragmatic strategies can be applied.
+ */
+export interface PragUsageSpaceDimensions {
+  /** Communicative purposes */
+  communicativePurposes: ('persuade' | 'inform' | 'request' | 'apologize' | 'complain' | 'suggest')[];
+
+  /** Formality levels (Joos, 1967) */
+  formalityLevels: ('intimate' | 'casual' | 'consultative' | 'formal' | 'frozen')[];
+
+  /** Interlocutor relationship dimensions */
+  interlocutorRelations: Array<{
+    powerDifferential: 'higher' | 'equal' | 'lower';
+    socialDistance: 'close' | 'neutral' | 'distant';
+  }>;
+
+  /** Applicable domains */
+  domains: string[];
+
+  /** Text types */
+  textTypes: string[];
+
+  /** Politeness strategies (Brown & Levinson, 1987) */
+  politenessStrategies: ('bald-on-record' | 'positive-politeness' | 'negative-politeness' | 'off-record')[];
+}
+
+/**
+ * Union type for component-specific usage space dimensions.
+ */
+export type ComponentUsageSpaceDimensions =
+  | { type: 'PHON'; dimensions: PhonUsageSpaceDimensions }
+  | { type: 'MORPH'; dimensions: MorphUsageSpaceDimensions }
+  | { type: 'LEX'; dimensions: LexUsageSpaceDimensions }
+  | { type: 'SYNT'; dimensions: SyntUsageSpaceDimensions }
+  | { type: 'PRAG'; dimensions: PragUsageSpaceDimensions };
+
+// =============================================================================
+// Representative Sampling Strategy
+// =============================================================================
+
+/**
+ * Strategy for selecting representative samples from usage space.
+ *
+ * Based on:
+ * - Prototype Theory (Rosch, 1975)
+ * - Variability of Practice (Schmidt, 1975)
+ * - Power Law of Practice (Newell & Rosenbloom, 1981)
+ */
+export interface RepresentativeSamplingStrategy {
+  /** Strategy identifier */
+  strategyId: string;
+
+  /** Component this strategy applies to */
+  componentType: ComponentCode;
+
+  /**
+   * Weight for goal alignment in sample selection.
+   * Higher = prefer samples aligned with user's goal.
+   */
+  goalWeight: number;
+
+  /**
+   * Weight for diversity in sample selection.
+   * Higher = prefer samples that increase coverage variety.
+   * Based on Variability of Practice (Schmidt, 1975).
+   */
+  diversityWeight: number;
+
+  /**
+   * Weight for transfer potential in sample selection.
+   * Higher = prefer samples likely to generalize to other contexts.
+   * Based on Transfer of Learning (Thorndike; Perkins & Salomon, 1992).
+   */
+  transferWeight: number;
+
+  /**
+   * Minimum samples needed for generalization.
+   * Based on Power Law of Practice.
+   */
+  minSamplesForGeneralization: number;
+
+  /** Primary selection criterion */
+  primaryCriterion: 'prototype' | 'diversity' | 'transfer' | 'goal_aligned';
+
+  /** Academic basis for this strategy */
+  basis: string;
+}
+
+/**
+ * Default sampling strategies per component.
+ */
+export const COMPONENT_SAMPLING_STRATEGIES: Record<ComponentCode, RepresentativeSamplingStrategy> = {
+  PHON: {
+    strategyId: 'phon-position-variety',
+    componentType: 'PHON',
+    goalWeight: 0.2,
+    diversityWeight: 0.5,  // High: need variety in positions
+    transferWeight: 0.3,
+    minSamplesForGeneralization: 5,
+    primaryCriterion: 'diversity',
+    basis: 'Phonological rules transfer across positions with varied practice',
+  },
+  MORPH: {
+    strategyId: 'morph-productive-roots',
+    componentType: 'MORPH',
+    goalWeight: 0.3,
+    diversityWeight: 0.3,
+    transferWeight: 0.4,  // High: morphological rules generalize well
+    minSamplesForGeneralization: 4,
+    primaryCriterion: 'transfer',
+    basis: 'Morphological patterns transfer to novel combinations (Carlisle, 2000)',
+  },
+  LEX: {
+    strategyId: 'lex-collocation-register',
+    componentType: 'LEX',
+    goalWeight: 0.4,  // High: vocabulary should align with goals
+    diversityWeight: 0.3,
+    transferWeight: 0.3,
+    minSamplesForGeneralization: 7,
+    primaryCriterion: 'goal_aligned',
+    basis: 'Vocabulary use is highly goal-dependent (Nation, 2001)',
+  },
+  SYNT: {
+    strategyId: 'synt-verb-genre',
+    componentType: 'SYNT',
+    goalWeight: 0.3,
+    diversityWeight: 0.4,  // Need variety in verb types and genres
+    transferWeight: 0.3,
+    minSamplesForGeneralization: 6,
+    primaryCriterion: 'diversity',
+    basis: 'Syntactic patterns require varied contexts (Pienemann, 2005)',
+  },
+  PRAG: {
+    strategyId: 'prag-purpose-formality',
+    componentType: 'PRAG',
+    goalWeight: 0.5,  // Highest: pragmatics is goal-driven
+    diversityWeight: 0.2,
+    transferWeight: 0.3,
+    minSamplesForGeneralization: 8,
+    primaryCriterion: 'goal_aligned',
+    basis: 'Pragmatic competence is purpose-driven (Brown & Levinson, 1987)',
+  },
+};
+
+// =============================================================================
+// Generalization Estimation (Transfer of Learning)
+// =============================================================================
+
+/**
+ * Transfer estimate between two usage contexts.
+ *
+ * Based on Transfer of Learning research (Thorndike, 1901;
+ * Perkins & Salomon, 1992).
+ */
+export interface TransferEstimate {
+  /** Source context (trained) */
+  sourceContext: UsageContext;
+
+  /** Target context (to be estimated) */
+  targetContext: UsageContext;
+
+  /**
+   * Transfer distance (0-1).
+   * Lower = more similar, higher transfer probability.
+   */
+  transferDistance: number;
+
+  /**
+   * Estimated transfer probability (0-1).
+   * Probability that mastery in source transfers to target.
+   */
+  transferProbability: number;
+
+  /** Type of transfer */
+  transferType: 'near' | 'far';
+
+  /** Confidence in this estimate */
+  confidence: number;
+
+  /** Basis for transfer (which dimensions are similar) */
+  transferBasis: string[];
+}
+
+/**
+ * Overall generalization estimate for an object.
+ *
+ * Estimates total usage space coverage including both
+ * directly trained contexts and inferred coverage via transfer.
+ */
+export interface GeneralizationEstimate {
+  /** Object ID */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Directly trained contexts */
+  directlyCovered: UsageContext[];
+
+  /** Direct coverage ratio (0-1) */
+  directCoverage: number;
+
+  /** Contexts covered via transfer */
+  inferredCoverage: TransferEstimate[];
+
+  /**
+   * Total estimated coverage (0-1).
+   * Combines direct + inferred with confidence weighting.
+   */
+  estimatedTotalCoverage: number;
+
+  /**
+   * Goal-aligned coverage (0-1).
+   * Weighted by relevance to user's goal.
+   */
+  goalAlignedCoverage: number;
+
+  /** Automation level of the object (FSRS stability) */
+  automationLevel: number;
+
+  /**
+   * Recommended next contexts to train.
+   * Selected for maximum coverage expansion.
+   */
+  recommendedNextContexts: UsageContext[];
+}
+
+// =============================================================================
+// Learning Goal (Stabilization vs Expansion)
+// =============================================================================
+
+/**
+ * Learning goal type for an object.
+ *
+ * - Stabilization: Focus on automaticity (high frequency, time pressure)
+ * - Expansion: Focus on usage space coverage (new contexts, diversity)
+ *
+ * Based on:
+ * - Skill Acquisition Theory (Anderson, 1993)
+ * - Desirable Difficulties (Bjork, 1994)
+ */
+export type LearningGoal = 'stabilization' | 'expansion';
+
+/**
+ * Reason for the assigned learning goal.
+ */
+export type LearningGoalReason =
+  | 'not_automated_yet'           // Automation level below threshold
+  | 'automated_low_coverage'      // Automated but usage space not covered
+  | 'prerequisite_not_met'        // Lower component needs stabilization first
+  | 'supporting_higher_component' // Stabilizing to support higher component
+  | 'goal_context_gap'            // Goal requires contexts not yet covered
+  | 'maintenance';                // Fully acquired, just maintaining
+
+/**
+ * Learning strategy for an object.
+ *
+ * Combines prerequisite status, automation level, and usage space
+ * coverage to determine optimal learning approach.
+ */
+export interface ObjectLearningStrategy {
+  /** Object ID */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Current learning goal */
+  currentGoal: LearningGoal;
+
+  /** Reason for this goal */
+  goalReason: LearningGoalReason;
+
+  /** Prerequisite status */
+  prerequisiteStatus: PrerequisiteStatus;
+
+  /** Current automation level (FSRS stability) */
+  automationLevel: number;
+
+  /** Required automation threshold */
+  automationThreshold: number;
+
+  /** Current usage space coverage */
+  usageSpaceCoverage: number;
+
+  /** Higher components this object supports */
+  supportsComponents: ComponentCode[];
+
+  /** Priority score for learning (higher = more urgent) */
+  priority: number;
+}
+
+/**
+ * Integrated object learning state.
+ *
+ * Complete state representation combining all aspects:
+ * - Prerequisite chain position
+ * - Automation (stabilization) status
+ * - Usage space (expansion) status
+ * - Generalization estimates
+ */
+export interface IntegratedObjectState {
+  /** Object ID */
+  objectId: string;
+
+  /** Component type */
+  componentType: ComponentCode;
+
+  /** Learning strategy */
+  strategy: ObjectLearningStrategy;
+
+  /** Generalization estimate */
+  generalization: GeneralizationEstimate;
+
+  /** Is this object ready for higher component support */
+  canSupportHigherComponents: boolean;
+
+  /** Recommended task parameters */
+  recommendedTaskParams: {
+    /** Prefer fluency tasks (time pressure, high frequency) */
+    preferFluency: boolean;
+    /** Prefer versatility tasks (new contexts, low PMI) */
+    preferVersatility: boolean;
+    /** Suggested contexts for next task */
+    suggestedContexts: string[];
+    /** Cognitive process to target */
+    targetProcess: CognitiveProcess;
+  };
 }

@@ -784,3 +784,375 @@ export function getContextById(contextId: string): UsageContext | undefined {
 export function getContextsForDomain(domain: string): UsageContext[] {
   return STANDARD_CONTEXTS.filter(c => c.domain === domain);
 }
+
+// =============================================================================
+// Generalization-Enhanced Context Selection
+// =============================================================================
+
+/**
+ * Strategy for context selection.
+ */
+export type ContextSelectionStrategy =
+  | 'coverage_maximization'  // Select contexts that maximize new coverage
+  | 'transfer_chain'         // Select contexts that enable transfer to others
+  | 'goal_alignment'         // Prioritize contexts aligned with user goal
+  | 'balanced';              // Balance all factors
+
+/**
+ * Enhanced configuration for context selection with generalization.
+ */
+export interface EnhancedContextSelectionConfig {
+  /** Selection strategy */
+  strategy: ContextSelectionStrategy;
+
+  /** Target contexts from user goal */
+  goalContexts: UsageContext[];
+
+  /** Whether to prefer expansion (new contexts) or reinforcement (known contexts) */
+  preferExpansion: boolean;
+
+  /** Minimum transfer probability for inferred coverage */
+  minTransferProbability: number;
+
+  /** Weight for goal alignment (0-1) */
+  goalAlignmentWeight: number;
+
+  /** Weight for diversity (0-1) */
+  diversityWeight: number;
+
+  /** Weight for transfer potential (0-1) */
+  transferWeight: number;
+}
+
+/**
+ * Default configuration for enhanced context selection.
+ */
+export const DEFAULT_CONTEXT_SELECTION_CONFIG: EnhancedContextSelectionConfig = {
+  strategy: 'balanced',
+  goalContexts: [],
+  preferExpansion: true,
+  minTransferProbability: 0.3,
+  goalAlignmentWeight: 0.4,
+  diversityWeight: 0.3,
+  transferWeight: 0.3,
+};
+
+/**
+ * Select optimal context with generalization awareness.
+ *
+ * This enhanced selection considers:
+ * 1. Direct coverage needs (uncovered goal contexts)
+ * 2. Transfer potential (contexts that enable generalization)
+ * 3. Diversity (avoiding redundant contexts)
+ * 4. Goal alignment (prioritizing goal-relevant contexts)
+ *
+ * Based on:
+ * - Transfer of Learning (Thorndike, Perkins & Salomon)
+ * - Prototype Theory (Rosch, 1975)
+ * - Variability of Practice (Schmidt, 1975)
+ */
+export async function selectContextWithGeneralization(
+  usageSpaces: ObjectUsageSpace[],
+  taskType: TaskType,
+  config: Partial<EnhancedContextSelectionConfig> = {}
+): Promise<UsageContext> {
+  const fullConfig = { ...DEFAULT_CONTEXT_SELECTION_CONFIG, ...config };
+
+  // Get applicable contexts for task type
+  const applicableContexts = STANDARD_CONTEXTS.filter(
+    c => c.applicableTaskTypes.includes(taskType)
+  );
+
+  if (applicableContexts.length === 0) {
+    return STANDARD_CONTEXTS[0]; // Fallback
+  }
+
+  // Score each context based on strategy
+  const scoredContexts = applicableContexts.map(context => {
+    let score = 0;
+
+    // 1. Goal alignment score
+    const goalScore = calculateContextGoalAlignment(context, fullConfig.goalContexts);
+
+    // 2. Coverage need score (prioritize uncovered contexts)
+    const coverageScore = calculateCoverageNeedScore(context, usageSpaces);
+
+    // 3. Transfer potential score (how much this context enables generalization)
+    const transferScore = calculateTransferPotentialScore(
+      context,
+      usageSpaces,
+      applicableContexts
+    );
+
+    // 4. Diversity score (different from already covered)
+    const diversityScore = calculateDiversityFromCovered(context, usageSpaces);
+
+    // Apply strategy-specific weighting
+    switch (fullConfig.strategy) {
+      case 'coverage_maximization':
+        score = coverageScore * 0.6 + transferScore * 0.3 + diversityScore * 0.1;
+        break;
+      case 'transfer_chain':
+        score = transferScore * 0.6 + coverageScore * 0.2 + diversityScore * 0.2;
+        break;
+      case 'goal_alignment':
+        score = goalScore * 0.6 + coverageScore * 0.3 + transferScore * 0.1;
+        break;
+      case 'balanced':
+      default:
+        score =
+          goalScore * fullConfig.goalAlignmentWeight +
+          coverageScore * 0.3 +
+          diversityScore * fullConfig.diversityWeight +
+          transferScore * fullConfig.transferWeight;
+    }
+
+    // Apply expansion/reinforcement preference
+    if (fullConfig.preferExpansion) {
+      // Boost uncovered contexts
+      const isCovered = usageSpaces.some(us =>
+        us.successfulContexts.some(sc => sc.contextId === context.contextId)
+      );
+      if (!isCovered) {
+        score *= 1.3;
+      }
+    } else {
+      // Boost covered contexts for reinforcement
+      const isCovered = usageSpaces.some(us =>
+        us.successfulContexts.some(sc => sc.contextId === context.contextId)
+      );
+      if (isCovered) {
+        score *= 1.2;
+      }
+    }
+
+    return { context, score };
+  });
+
+  // Sort by score and return best
+  scoredContexts.sort((a, b) => b.score - a.score);
+  return scoredContexts[0]?.context || applicableContexts[0];
+}
+
+/**
+ * Calculate goal alignment score for a context.
+ */
+function calculateContextGoalAlignment(
+  context: UsageContext,
+  goalContexts: UsageContext[]
+): number {
+  if (goalContexts.length === 0) return 0.5;
+
+  // Direct match
+  if (goalContexts.some(gc => gc.contextId === context.contextId)) {
+    return 1.0;
+  }
+
+  // Similarity to goal contexts
+  let maxSimilarity = 0;
+  for (const goalContext of goalContexts) {
+    const similarity = calculateContextSimilarity(context, goalContext);
+    maxSimilarity = Math.max(maxSimilarity, similarity);
+  }
+
+  return maxSimilarity;
+}
+
+/**
+ * Calculate similarity between two contexts.
+ */
+function calculateContextSimilarity(context1: UsageContext, context2: UsageContext): number {
+  let matches = 0;
+  let total = 0;
+
+  // Domain
+  total++;
+  if (context1.domain === context2.domain) matches++;
+
+  // Register
+  total++;
+  if (context1.register === context2.register) matches++;
+
+  // Modality
+  total++;
+  if (context1.modality === context2.modality) matches++;
+
+  // Genre
+  total++;
+  if (context1.genre === context2.genre) matches++;
+
+  return matches / total;
+}
+
+/**
+ * Calculate coverage need score (higher for uncovered target contexts).
+ */
+function calculateCoverageNeedScore(
+  context: UsageContext,
+  usageSpaces: ObjectUsageSpace[]
+): number {
+  let needScore = 0;
+
+  for (const usageSpace of usageSpaces) {
+    // Check if this is a target context
+    const isTarget = usageSpace.targetContexts.includes(context.contextId);
+    if (!isTarget) continue;
+
+    // Check if already covered
+    const isCovered = usageSpace.successfulContexts.some(
+      sc => sc.contextId === context.contextId
+    );
+
+    if (!isCovered) {
+      // Uncovered target - high need
+      needScore += 1.0;
+    } else {
+      // Covered but might need reinforcement
+      const coverage = usageSpace.successfulContexts.find(
+        sc => sc.contextId === context.contextId
+      );
+      if (coverage && coverage.successRate < 0.8) {
+        needScore += 0.3; // Needs improvement
+      }
+    }
+  }
+
+  // Normalize by number of usage spaces
+  return usageSpaces.length > 0 ? needScore / usageSpaces.length : 0;
+}
+
+/**
+ * Calculate transfer potential score.
+ * Higher score for contexts that can transfer to many other uncovered contexts.
+ */
+function calculateTransferPotentialScore(
+  context: UsageContext,
+  usageSpaces: ObjectUsageSpace[],
+  allContexts: UsageContext[]
+): number {
+  // Find uncovered contexts
+  const coveredIds = new Set<string>();
+  for (const usageSpace of usageSpaces) {
+    for (const sc of usageSpace.successfulContexts) {
+      coveredIds.add(sc.contextId);
+    }
+  }
+
+  const uncoveredContexts = allContexts.filter(c => !coveredIds.has(c.contextId));
+
+  if (uncoveredContexts.length === 0) return 0;
+
+  // Count how many uncovered contexts this one could transfer to
+  let transferableCount = 0;
+  for (const uncovered of uncoveredContexts) {
+    const similarity = calculateContextSimilarity(context, uncovered);
+    // Near transfer threshold: similarity >= 0.5
+    if (similarity >= 0.5) {
+      transferableCount++;
+    }
+  }
+
+  return transferableCount / uncoveredContexts.length;
+}
+
+/**
+ * Calculate diversity from already covered contexts.
+ */
+function calculateDiversityFromCovered(
+  context: UsageContext,
+  usageSpaces: ObjectUsageSpace[]
+): number {
+  // Get all covered contexts
+  const coveredContextIds = new Set<string>();
+  for (const usageSpace of usageSpaces) {
+    for (const sc of usageSpace.successfulContexts) {
+      coveredContextIds.add(sc.contextId);
+    }
+  }
+
+  if (coveredContextIds.size === 0) return 1.0; // No coverage = maximum diversity
+
+  // Calculate minimum similarity to any covered context
+  let minSimilarity = 1.0;
+  for (const coveredId of coveredContextIds) {
+    const coveredContext = STANDARD_CONTEXTS.find(c => c.contextId === coveredId);
+    if (coveredContext) {
+      const similarity = calculateContextSimilarity(context, coveredContext);
+      minSimilarity = Math.min(minSimilarity, similarity);
+    }
+  }
+
+  // Higher diversity = lower similarity to covered
+  return 1 - minSimilarity;
+}
+
+/**
+ * Get recommended next contexts for maximum coverage gain.
+ *
+ * Returns contexts ordered by expected coverage gain,
+ * considering both direct coverage and transfer potential.
+ */
+export function getRecommendedNextContexts(
+  usageSpace: ObjectUsageSpace,
+  maxRecommendations: number = 3
+): Array<{
+  context: UsageContext;
+  expectedCoverageGain: number;
+  transferPotential: number;
+  reason: string;
+}> {
+  const recommendations: Array<{
+    context: UsageContext;
+    expectedCoverageGain: number;
+    transferPotential: number;
+    reason: string;
+  }> = [];
+
+  const coveredIds = new Set(usageSpace.successfulContexts.map(sc => sc.contextId));
+
+  for (const targetId of usageSpace.targetContexts) {
+    if (coveredIds.has(targetId)) continue;
+
+    const context = STANDARD_CONTEXTS.find(c => c.contextId === targetId);
+    if (!context) continue;
+
+    // Calculate expected coverage gain
+    const directGain = 1 / usageSpace.targetContexts.length;
+
+    // Calculate transfer potential to other uncovered targets
+    const uncoveredTargets = usageSpace.targetContexts.filter(
+      t => t !== targetId && !coveredIds.has(t)
+    );
+
+    let transferPotential = 0;
+    for (const otherId of uncoveredTargets) {
+      const otherContext = STANDARD_CONTEXTS.find(c => c.contextId === otherId);
+      if (otherContext) {
+        const similarity = calculateContextSimilarity(context, otherContext);
+        if (similarity >= 0.5) {
+          transferPotential += similarity * 0.5; // Discount for being inferred
+        }
+      }
+    }
+
+    const expectedCoverageGain = directGain + transferPotential;
+
+    // Generate reason
+    let reason = `Direct coverage of ${context.name}`;
+    if (transferPotential > 0) {
+      reason += ` + potential transfer to ${Math.round(transferPotential / 0.5)} contexts`;
+    }
+
+    recommendations.push({
+      context,
+      expectedCoverageGain,
+      transferPotential,
+      reason,
+    });
+  }
+
+  // Sort by expected coverage gain
+  recommendations.sort((a, b) => b.expectedCoverageGain - a.expectedCoverageGain);
+
+  return recommendations.slice(0, maxRecommendations);
+}

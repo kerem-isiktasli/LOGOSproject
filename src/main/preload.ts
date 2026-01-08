@@ -19,7 +19,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
-import type { LogosAPI } from '../shared/types';
+import type { LogosAPI, GoalSpec, LearningQueueItem, User, UserSettings } from '../shared/types';
 
 /**
  * Type-safe IPC invoke wrapper.
@@ -43,7 +43,11 @@ const logosAPI: LogosAPI = {
   goal: {
     create: (data) => invoke('goal:create', data),
     get: (id) => invoke('goal:get', { id }),
-    list: (includeInactive) => invoke('goal:list', { activeOnly: !includeInactive }),
+    list: async (includeInactive) => {
+      // goal:list returns { goals, total }, extract just the goals array
+      const result = await invoke<{ goals: GoalSpec[]; total: number }>('goal:list', { activeOnly: !includeInactive });
+      return result.goals;
+    },
     update: (data) => invoke('goal:update', { id: data.id, updates: data }),
     delete: (id, _hard) => invoke('goal:delete', { id }),
   },
@@ -125,12 +129,12 @@ const logosAPI: LogosAPI = {
 
     // Get next item from queue - use queue:get and return first item
     getNext: async (goalId, excludeIds) => {
-      const queue = await invoke<Array<{ object: { id: string } }>>('queue:get', {
+      const queue = await invoke<LearningQueueItem[]>('queue:get', {
         goalId,
         sessionSize: 10,
       });
       const filtered = excludeIds
-        ? queue.filter((item) => !excludeIds.includes(item.object.id))
+        ? queue.filter((item) => !excludeIds.includes(item.objectId))
         : queue;
       return filtered.length > 0 ? filtered[0] : null;
     },
@@ -203,16 +207,25 @@ const logosAPI: LogosAPI = {
   // ============================================================================
 
   profile: {
-    get: () =>
-      invoke('profile:get', {}).catch(() => ({
+    get: (): Promise<User> =>
+      invoke<User>('profile:get', {}).catch(() => ({
         id: 'default',
-        email: 'default@logos.local',
-        name: 'Default User',
+        nativeLanguage: 'en',
+        targetLanguage: 'en',
+        theta: {
+          thetaGlobal: 0,
+          thetaPhonology: 0,
+          thetaMorphology: 0,
+          thetaLexical: 0,
+          thetaSyntactic: 0,
+          thetaPragmatic: 0,
+        },
+        createdAt: new Date(),
       })),
-    update: (data) =>
-      invoke('profile:update', data).catch(() => data),
-    getSettings: () =>
-      invoke('profile:getSettings', {}).catch(() => ({
+    update: (data): Promise<User> =>
+      invoke<User>('profile:update', data).catch(() => data as unknown as User),
+    getSettings: (): Promise<UserSettings> =>
+      invoke<UserSettings>('profile:getSettings', {}).catch(() => ({
         dailyGoalMinutes: 30,
         sessionLength: 20,
         notificationsEnabled: true,
@@ -220,8 +233,8 @@ const logosAPI: LogosAPI = {
         theme: 'system' as const,
         targetRetention: 0.9,
       })),
-    updateSettings: (settings) =>
-      invoke('profile:updateSettings', settings).catch(() => settings),
+    updateSettings: (settings): Promise<UserSettings> =>
+      invoke<UserSettings>('profile:updateSettings', settings).catch(() => settings as UserSettings),
   },
 
   // ============================================================================

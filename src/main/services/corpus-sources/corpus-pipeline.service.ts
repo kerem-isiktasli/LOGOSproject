@@ -908,13 +908,9 @@ async function insertVocabulary(
       // Create MasteryState if it doesn't exist (for new objects)
       await db.masteryState.upsert({
         where: {
-          userId_objectId: {
-            userId,
-            objectId: langObject.id,
-          },
+          objectId: langObject.id,
         },
         create: {
-          userId,
           objectId: langObject.id,
           stage: 0,
           fsrsDifficulty: 5,
@@ -1028,15 +1024,17 @@ export async function generateMorphologicalObjects(
     // Analyze morphology using core module
     const morphAnalysis = analyzeMorphology(lex.content);
 
-    // Skip words without productive affixes at or above minLevel
+    // Skip words without productive affixes (productivity >= minLevel threshold)
+    // Note: Affix.productivity is 0-1 scale, minLevel is 1-5, so normalize
+    const productivityThreshold = minLevel / 5;
     const hasProductiveAffix =
-      morphAnalysis.prefixes.some((p: Affix) => p.level >= minLevel) ||
-      morphAnalysis.suffixes.some((s: Affix) => s.level >= minLevel);
+      morphAnalysis.prefixes.some((p: Affix) => p.productivity >= productivityThreshold) ||
+      morphAnalysis.suffixes.some((s: Affix) => s.productivity >= productivityThreshold);
 
     if (!hasProductiveAffix) continue;
 
-    // Compute morphological complexity score
-    const morphScore = computeMorphologicalScore(morphAnalysis);
+    // Compute morphological complexity score (returns a number 0-1)
+    const morphScore = computeMorphologicalScore(lex.content);
 
     // Create MORPH object for affix patterns
     const morphContent = buildMorphContent(lex.content, morphAnalysis);
@@ -1051,20 +1049,9 @@ export async function generateMorphologicalObjects(
           content: morphContent,
           type: 'MORPH',
           frequency: lex.content.length > 8 ? 0.4 : 0.6, // Longer = less frequent
-          relationalDensity: morphScore.derivationalComplexity,
-          contextualContribution: morphScore.productivityScore,
-          priority: morphScore.learningDifficulty,
-          metadata: JSON.stringify({
-            baseWord: lex.content,
-            root: morphAnalysis.root,
-            prefixes: morphAnalysis.prefixes.map((p: Affix) => p.form),
-            suffixes: morphAnalysis.suffixes.map((s: Affix) => s.form),
-            affixLevel: Math.max(
-              ...morphAnalysis.prefixes.map((p: Affix) => p.level),
-              ...morphAnalysis.suffixes.map((s: Affix) => s.level),
-              0
-            ),
-          }),
+          relationalDensity: morphScore,
+          contextualContribution: morphScore * 0.8,
+          priority: morphScore,
         },
         update: {},
       });
@@ -1072,13 +1059,12 @@ export async function generateMorphologicalObjects(
       // Create MasteryState
       await db.masteryState.upsert({
         where: {
-          userId_objectId: { userId: goal.userId, objectId },
+          objectId,
         },
         create: {
-          userId: goal.userId,
           objectId,
           stage: 0,
-          fsrsDifficulty: 5 + morphScore.learningDifficulty * 2,
+          fsrsDifficulty: 5 + morphScore * 2,
           fsrsStability: 0,
           fsrsReps: 0,
           fsrsLapses: 0,
@@ -1154,14 +1140,20 @@ export async function generatePhonologicalObjects(
 
     // Analyze G2P difficulty using core module
     const g2pAnalysis = analyzeG2PDifficulty(lex.content, nativeLanguage);
-    const phonDifficulty = computePhonologicalDifficulty(g2pAnalysis);
+    // computePhonologicalDifficulty takes a word string, returns a number
+    const phonDifficulty = computePhonologicalDifficulty(lex.content, nativeLanguage);
 
     // Skip words below difficulty threshold
-    if (phonDifficulty.overall < minDifficulty) continue;
+    if (phonDifficulty < minDifficulty) continue;
 
     // Create G2P object
     const objectId = `${goalId}-g2p-${lex.content}`.substring(0, 36);
     const graphemes = segmentGraphemes(lex.content);
+
+    // Calculate L1 interference score from potential mispronunciations
+    const l1InterferenceScore = g2pAnalysis.potentialMispronunciations.length > 0
+      ? Math.min(1, g2pAnalysis.potentialMispronunciations.length / 5)
+      : 0;
 
     try {
       await db.languageObject.upsert({
@@ -1172,15 +1164,15 @@ export async function generatePhonologicalObjects(
           content: buildG2PContent(lex.content, g2pAnalysis),
           type: 'G2P',
           frequency: 0.5,
-          relationalDensity: phonDifficulty.overall,
-          contextualContribution: g2pAnalysis.l1Interference,
-          priority: phonDifficulty.overall,
-          metadata: JSON.stringify({
+          relationalDensity: phonDifficulty,
+          contextualContribution: l1InterferenceScore,
+          priority: phonDifficulty,
+          phonologicalDifficulty: phonDifficulty,
+          contentJson: JSON.stringify({
             baseWord: lex.content,
             graphemes,
             irregularities: g2pAnalysis.irregularPatterns,
-            l1Interference: g2pAnalysis.l1Interference,
-            silentLetters: g2pAnalysis.silentLetters,
+            hasSilentLetters: g2pAnalysis.hasSilentLetters,
             difficulty: phonDifficulty,
           }),
         },
@@ -1190,13 +1182,12 @@ export async function generatePhonologicalObjects(
       // Create MasteryState
       await db.masteryState.upsert({
         where: {
-          userId_objectId: { userId: goal.userId, objectId },
+          objectId,
         },
         create: {
-          userId: goal.userId,
           objectId,
           stage: 0,
-          fsrsDifficulty: 5 + phonDifficulty.overall * 3,
+          fsrsDifficulty: 5 + phonDifficulty * 3,
           fsrsStability: 0,
           fsrsReps: 0,
           fsrsLapses: 0,
@@ -1226,13 +1217,14 @@ function buildG2PContent(
 ): string {
   const issues: string[] = [];
 
-  if (analysis.silentLetters.length > 0) {
-    issues.push(`silent: ${analysis.silentLetters.join(', ')}`);
+  if (analysis.hasSilentLetters) {
+    issues.push('silent letters');
   }
   if (analysis.irregularPatterns.length > 0) {
-    issues.push(`irregular: ${analysis.irregularPatterns.slice(0, 2).join(', ')}`);
+    const patternNames = analysis.irregularPatterns.slice(0, 2).map(p => p.pattern);
+    issues.push(`irregular: ${patternNames.join(', ')}`);
   }
-  if (analysis.l1Interference > 0.5) {
+  if (analysis.potentialMispronunciations.length > 0) {
     issues.push('L1 interference');
   }
 
@@ -1284,7 +1276,8 @@ export async function generateSyntacticObjects(
           relationalDensity: syntAnalysis.subordinationIndex,
           contextualContribution: syntAnalysis.nominalRatio,
           priority: syntAnalysis.dependencyDepth / 10,
-          metadata: JSON.stringify({
+          syntacticComplexity: syntAnalysis.subordinationIndex,
+          contentJson: JSON.stringify({
             sentenceLength: syntAnalysis.sentenceLength,
             dependencyDepth: syntAnalysis.dependencyDepth,
             clauseCount: syntAnalysis.clauseCount,
@@ -1301,10 +1294,9 @@ export async function generateSyntacticObjects(
       // Create MasteryState
       await db.masteryState.upsert({
         where: {
-          userId_objectId: { userId: goal.userId, objectId },
+          objectId,
         },
         create: {
-          userId: goal.userId,
           objectId,
           stage: 0,
           fsrsDifficulty: mapCEFRToDifficulty(syntAnalysis.estimatedCEFR),
@@ -1407,13 +1399,13 @@ export async function generatePragmaticObjects(
           relationalDensity: pattern.formality,
           contextualContribution: pattern.domainSpecificity,
           priority: pattern.learningPriority,
-          metadata: JSON.stringify({
+          pragmaticScore: pattern.formality,
+          contentJson: JSON.stringify({
             pragmaticType: pattern.type,
             speechAct: pattern.speechAct,
             register: pattern.register,
             politenessLevel: pattern.politeness,
             domain: goal.domain,
-            genre: goal.genre,
           }),
         },
         update: {},
@@ -1422,10 +1414,9 @@ export async function generatePragmaticObjects(
       // Create MasteryState
       await db.masteryState.upsert({
         where: {
-          userId_objectId: { userId: goal.userId, objectId },
+          objectId,
         },
         create: {
-          userId: goal.userId,
           objectId,
           stage: 0,
           fsrsDifficulty: 5 + pattern.formality * 2,

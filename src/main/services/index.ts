@@ -15,7 +15,6 @@ export {
   type ThetaState,
   type PriorityWeights,
   type LearningQueueItem,
-  type StateAnalysis,
   type QueueAnalysis,
   // Functions
   getUserThetaState,
@@ -63,13 +62,10 @@ export {
   // Types
   type UserResponse,
   type EvaluationResult,
-  type MasteryUpdate,
   type ResponseOutcome,
   type ScoringConfig,
   // Functions
   evaluateResponse,
-  calculateMasteryUpdates,
-  calculateThetaContribution,
   processResponse,
 } from './scoring-update.service';
 
@@ -180,9 +176,10 @@ export {
   type ContentRequest,
   type ErrorAnalysisRequest,
   type HintRequest,
-  type ContentResponse,
-  type ErrorAnalysisResponse,
-  type HintResponse,
+  type GeneratedContent,
+  type ErrorAnalysis,
+  type Hint,
+  type ServiceStatus,
   // Functions
   getClaudeService,
   ClaudeService,
@@ -196,7 +193,7 @@ export {
   type TriggerContext,
   type DevelopmentBottleneck,
   type AgentTrigger,
-  type TriggerResult,
+  type AgentCreationSpec,
   // Functions
   getAgentTriggerService,
   detectAgentTriggers,
@@ -207,9 +204,7 @@ export {
 export {
   // Types
   type OperationType,
-  type OperationContext,
+  type DomainType,
+  type HookContext,
   type HookResult,
-  // Functions
-  createOperationHook,
-  wrapWithAgentDetection,
 } from './agent-hooks.service';

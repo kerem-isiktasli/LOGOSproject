@@ -272,10 +272,15 @@ export interface SessionEndRequest {
 
 export interface SessionSubmitResponseRequest {
   sessionId: string;
-  taskId: string;
-  response: string;
+  objectId: string;
+  correct: boolean;
+  cueLevel: 0 | 1 | 2 | 3;
   responseTimeMs: number;
-  hintsUsed: number;
+  taskType?: string;
+  taskFormat?: string;
+  modality?: string;
+  responseContent?: string;
+  expectedContent?: string;
 }
 
 export interface SessionSubmitResponseResponse {

@@ -627,7 +627,7 @@ export class ClaudeService {
   async generateContent(request: ContentRequest): Promise<GeneratedContent> {
     // Check cache first
     if (this.cacheEnabled) {
-      const cacheKey = this.cache.generateKey('content', request);
+      const cacheKey = this.cache.generateKey('content', request as unknown as Record<string, unknown>);
       const cached = this.cache.get<GeneratedContent>(cacheKey);
       if (cached) {
         return { ...cached, metadata: { ...cached.metadata, cached: true } };
@@ -640,7 +640,7 @@ export class ClaudeService {
 
       // Cache the result
       if (this.cacheEnabled) {
-        const cacheKey = this.cache.generateKey('content', request);
+        const cacheKey = this.cache.generateKey('content', request as unknown as Record<string, unknown>);
         this.cache.set(cacheKey, result);
       }
 
@@ -662,7 +662,7 @@ export class ClaudeService {
   async analyzeError(request: ErrorAnalysisRequest): Promise<ErrorAnalysis> {
     // Check cache first
     if (this.cacheEnabled) {
-      const cacheKey = this.cache.generateKey('error', request);
+      const cacheKey = this.cache.generateKey('error', request as unknown as Record<string, unknown>);
       const cached = this.cache.get<ErrorAnalysis>(cacheKey);
       if (cached) {
         return cached;
@@ -675,7 +675,7 @@ export class ClaudeService {
 
       // Cache the result
       if (this.cacheEnabled) {
-        const cacheKey = this.cache.generateKey('error', request);
+        const cacheKey = this.cache.generateKey('error', request as unknown as Record<string, unknown>);
         this.cache.set(cacheKey, result);
       }
 
@@ -702,7 +702,7 @@ export class ClaudeService {
   async getHint(request: HintRequest): Promise<Hint> {
     // Check cache first
     if (this.cacheEnabled) {
-      const cacheKey = this.cache.generateKey('hint', request);
+      const cacheKey = this.cache.generateKey('hint', request as unknown as Record<string, unknown>);
       const cached = this.cache.get<Hint>(cacheKey);
       if (cached) {
         return cached;
@@ -715,7 +715,7 @@ export class ClaudeService {
 
       // Cache the result
       if (this.cacheEnabled) {
-        const cacheKey = this.cache.generateKey('hint', request);
+        const cacheKey = this.cache.generateKey('hint', request as unknown as Record<string, unknown>);
         this.cache.set(cacheKey, result);
       }
 

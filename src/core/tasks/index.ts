@@ -6,10 +6,11 @@
  */
 
 // Traditional Task Types
+// Note: CognitiveProcess renamed to TraditionalCognitiveProcess to avoid conflict with core/types.ts
 export {
   type TaskCategory,
   type TraditionalTaskType,
-  type CognitiveProcess,
+  type CognitiveProcess as TraditionalCognitiveProcess,
   type ResponseFormat,
   type TraditionalTaskTypeMeta,
   TRADITIONAL_TASK_TYPES,

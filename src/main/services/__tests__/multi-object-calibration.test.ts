@@ -9,6 +9,7 @@
  * - Feedback generation
  */
 
+import { describe, it, expect } from 'vitest';
 import {
   allocateQMatrixWeights,
   objectTypeToComponent,

@@ -580,11 +580,12 @@ describe('Response Mapping', () => {
       masteryState: null,
     };
 
+    const masteryState = dbObject.masteryState as { stage: number } | null;
     const response = {
       id: dbObject.id,
       content: dbObject.content,
-      mastery: dbObject.masteryState ? {
-        stage: dbObject.masteryState.stage,
+      mastery: masteryState ? {
+        stage: masteryState.stage,
       } : undefined,
     };
 

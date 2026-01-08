@@ -17,6 +17,8 @@ import {
   getTaskCategory,
 } from '../../core/response-timing';
 import type { FSRSResponseData } from '../../core/fsrs';
+import { evaluateObject, type ObjectEvaluationInput, type ObjectEvaluationResult } from '../services/multi-layer-evaluation.service';
+import type { ComponentCode, ObjectRole, TaskType, MasteryStage, TaskFormat } from '../../core/types';
 
 // =============================================================================
 // IRT Calibration Configuration
@@ -261,11 +263,14 @@ export function registerSessionHandlers(): void {
       const currentStage = mastery?.stage ?? 0;
 
       // Analyze response timing for quality assessment
-      const taskCategory = getTaskCategory(taskFormat as 'mcq' | 'fill_blank' | 'free_response', taskType);
+      const taskCategory = getTaskCategory(
+        taskFormat as 'mcq' | 'fill_blank' | 'free_response' | undefined,
+        taskType as TaskType | undefined
+      );
       const timingAnalysis = analyzeResponseTime(
         responseTimeMs,
         taskCategory,
-        currentStage,
+        currentStage as MasteryStage,
         wordLength,
         correct
       );
@@ -274,17 +279,46 @@ export function registerSessionHandlers(): void {
       const timingAwareRating = calculateFSRSRatingWithTiming(
         correct,
         responseTimeMs,
-        taskFormat as 'mcq' | 'fill_blank' | 'free_response',
-        currentStage,
+        (taskFormat || 'fill_blank') as TaskFormat,
+        currentStage as MasteryStage,
         wordLength
       );
+
+      // Multi-layer evaluation for partial credit scoring
+      // Uses binary mode - can be upgraded to partial_credit when layers are configured per-object
+      let layerEvaluation: ObjectEvaluationResult | null = null;
+      if (responseContent && expectedContent && languageObject) {
+        try {
+          const componentType = (languageObject.type?.toUpperCase() || 'LEX') as ComponentCode;
+          const evalInput: ObjectEvaluationInput = {
+            objectId,
+            componentType,
+            response: responseContent,
+            expected: [expectedContent],
+            config: {
+              objectId,
+              componentType,
+              evaluationMode: 'binary',
+            },
+            role: 'target' as ObjectRole,
+            weight: 1.0,
+            context: {
+              taskType: taskType || 'recall',
+              domain: 'general',
+            },
+          };
+          layerEvaluation = evaluateObject(evalInput);
+        } catch (evalErr) {
+          console.warn('Multi-layer evaluation failed, using binary scoring:', evalErr);
+        }
+      }
 
       // Create response record with timing metadata
       const response = await prisma.response.create({
         data: {
           sessionId,
           objectId,
-          correct,
+          correct: layerEvaluation?.correct ?? correct,
           cueLevel,
           responseTimeMs,
           taskType: taskType || 'recall',
@@ -389,15 +423,25 @@ export function registerSessionHandlers(): void {
         });
       }
 
-      // Update user theta if we have enough responses
+      // Get current session to check mode
+      const currentSession = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: { mode: true, goalId: true },
+      });
+
+      // Update user theta ONLY in evaluation mode
+      // learning/training modes maximize iteration without affecting theta
+      // evaluation mode is for assessment and theta updates
+      const isEvaluationMode = currentSession?.mode === 'evaluation';
+
       const recentResponses = await prisma.response.findMany({
-        where: { session: { goalId: (await prisma.session.findUnique({ where: { id: sessionId } }))?.goalId } },
+        where: { session: { goalId: currentSession?.goalId } },
         orderBy: { createdAt: 'desc' },
         take: 50,
         include: { object: true },
       });
 
-      if (recentResponses.length >= 10) {
+      if (recentResponses.length >= 10 && isEvaluationMode) {
         // Build IRT item parameters and response array for theta estimation
         const items = recentResponses.map((r: { object: { irtDifficulty: number; irtDiscrimination?: number | null } }) => ({
           id: r.object.irtDifficulty.toString(),
@@ -507,7 +551,7 @@ export function registerSessionHandlers(): void {
       }
 
       // Update ComponentErrorStats for bottleneck tracking (if error occurred)
-      if (!correct && langObjForPriority) {
+      if (!correct && langObjForPriority && languageObject) {
         const session = await prisma.session.findUnique({
           where: { id: sessionId },
           select: { userId: true, goalId: true },

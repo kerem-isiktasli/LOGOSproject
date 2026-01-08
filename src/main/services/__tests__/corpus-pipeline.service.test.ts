@@ -329,7 +329,7 @@ describe('Corpus Pipeline Service', () => {
 
   describe('deduplicateVocabulary', () => {
     it('should remove duplicate entries', () => {
-      const items = [
+      const items: VocabularyItem[] = [
         { content: 'word', type: 'LEX', frequency: 0.5, sourceId: 'a' },
         { content: 'word', type: 'LEX', frequency: 0.6, sourceId: 'b' },
         { content: 'other', type: 'LEX', frequency: 0.3, sourceId: 'a' },
@@ -344,7 +344,7 @@ describe('Corpus Pipeline Service', () => {
     });
 
     it('should keep entry with highest frequency', () => {
-      const items = [
+      const items: VocabularyItem[] = [
         { content: 'word', type: 'LEX', frequency: 0.3, sourceId: 'a' },
         { content: 'word', type: 'LEX', frequency: 0.8, sourceId: 'b' },
         { content: 'word', type: 'LEX', frequency: 0.5, sourceId: 'c' },

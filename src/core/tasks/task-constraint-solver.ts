@@ -406,9 +406,14 @@ export class TaskConstraintSolver {
       return requiredDomains.includes('general') ? 0.5 : 0;
     }
 
+    // Parse domainDistribution if it's a JSON string
+    const distribution: Record<string, number> = typeof object.domainDistribution === 'string'
+      ? JSON.parse(object.domainDistribution)
+      : object.domainDistribution;
+
     let totalMatch = 0;
     for (const domain of requiredDomains) {
-      const weight = object.domainDistribution[domain] || 0;
+      const weight = distribution[domain] || 0;
       totalMatch += weight;
     }
 

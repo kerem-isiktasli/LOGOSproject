@@ -27,6 +27,7 @@ import {
   recordResponse,
   applyThetaRules,
   type ThetaState,
+  type SessionMode,
 } from '../db/repositories/session.repository';
 import { updateObjectPriority } from '../db/repositories/goal.repository';
 import {
@@ -793,14 +794,14 @@ export async function processMultiObjectResponse(
     throw new Error(`Session not found: ${sessionId}`);
   }
 
-  // Build theta profile from session
+  // Build theta profile from session's user
   const thetaProfile: UserThetaProfile = {
-    thetaGlobal: session.thetaGlobal,
-    thetaPhonology: session.thetaPhonology,
-    thetaMorphology: session.thetaMorphology,
-    thetaLexical: session.thetaLexical,
-    thetaSyntactic: session.thetaSyntactic,
-    thetaPragmatic: session.thetaPragmatic,
+    thetaGlobal: session.user.thetaGlobal,
+    thetaPhonology: session.user.thetaPhonology,
+    thetaMorphology: session.user.thetaMorphology,
+    thetaLexical: session.user.thetaLexical,
+    thetaSyntactic: session.user.thetaSyntactic,
+    thetaPragmatic: session.user.thetaPragmatic,
   };
 
   // 2. Evaluate multi-component response
@@ -818,14 +819,14 @@ export async function processMultiObjectResponse(
   const aggregatedThetaChange = aggregateThetaContributions(thetaContributions);
 
   // 5. Update session theta
-  await applyThetaRules(sessionId, {
+  await applyThetaRules(session.userId, session.mode as SessionMode, {
     thetaGlobal: aggregatedThetaChange.thetaGlobal || 0,
     thetaPhonology: aggregatedThetaChange.thetaPhonology || 0,
     thetaMorphology: aggregatedThetaChange.thetaMorphology || 0,
     thetaLexical: aggregatedThetaChange.thetaLexical || 0,
     thetaSyntactic: aggregatedThetaChange.thetaSyntactic || 0,
     thetaPragmatic: aggregatedThetaChange.thetaPragmatic || 0,
-  } as ThetaState);
+  });
 
   // 6. Update each object's mastery and priority
   const masteryUpdates: MultiObjectResponseOutcome['masteryUpdates'] = [];
@@ -839,10 +840,7 @@ export async function processMultiObjectResponse(
     // Get current mastery
     const mastery = await db.masteryState.findUnique({
       where: {
-        userId_objectId: {
-          userId: session.userId,
-          objectId: target.objectId,
-        },
+        objectId: target.objectId,
       },
     });
 
@@ -850,49 +848,69 @@ export async function processMultiObjectResponse(
 
     const previousStage = mastery.stage as MasteryStage;
 
-    // Record exposure
-    await recordExposure(session.userId, target.objectId, {
-      correct: compEval.correct,
-      responseTime: responseTimeMs,
-      cueLevel,
-      taskType: taskSpec.taskType,
-      modality: taskSpec.modality,
-    });
+    // Record exposure (objectId, correct, cueLevel)
+    await recordExposure(target.objectId, compEval.correct, cueLevel);
 
     // Update mastery accuracy
     const exposureCount = mastery.exposureCount + 1;
     const newAccuracy = (mastery.cueFreeAccuracy * mastery.exposureCount + compEval.partialCredit) / exposureCount;
 
-    await updateMasteryState(session.userId, target.objectId, {
+    await updateMasteryState(target.objectId, {
       cueFreeAccuracy: cueLevel === 0 ? newAccuracy : mastery.cueFreeAccuracy,
       cueAssistedAccuracy: cueLevel > 0 ? newAccuracy : mastery.cueAssistedAccuracy,
-      lastSeen: new Date(),
+      exposureCount,
     });
 
-    // Check for stage transition
-    const stageTransition = await transitionStage(session.userId, target.objectId);
-    const newStage = stageTransition.newStage;
+    // Determine new stage based on accuracy thresholds
+    let newStage = previousStage;
+    if (newAccuracy >= 0.9 && previousStage < 4) {
+      newStage = (previousStage + 1) as MasteryStage;
+      await transitionStage(target.objectId, newStage);
+    }
+
+    const stageChanged = newStage !== previousStage;
 
     masteryUpdates.push({
       objectId: target.objectId,
       componentType: target.componentType,
       previousStage,
       newStage,
-      stageChanged: stageTransition.changed,
+      stageChanged,
       newAccuracy,
     });
 
-    // Update FSRS
+    // Update FSRS using the FSRS class from core
     const fsrsRating = compEval.correct ? (compEval.partialCredit >= 0.95 ? 4 : 3) : 1;
-    const fsrsResult = await updateFSRSParameters(session.userId, target.objectId, fsrsRating);
-    if (fsrsResult) {
-      fsrsUpdates.push({
-        objectId: target.objectId,
-        nextReview: fsrsResult.nextReview,
-        stability: fsrsResult.stability,
-        difficulty: fsrsResult.difficulty,
-      });
-    }
+    const { FSRS } = await import('../../core/fsrs');
+    const fsrs = new FSRS();
+
+    // Get or create FSRS card state
+    const currentCard = {
+      difficulty: mastery.fsrsDifficulty,
+      stability: mastery.fsrsStability,
+      lastReview: mastery.fsrsLastReview ?? new Date(),
+      reps: mastery.exposureCount,
+      lapses: mastery.fsrsLapses || 0,
+      state: mastery.fsrsState as 'new' | 'learning' | 'review' | 'relearning' || 'new',
+    };
+
+    const updatedCard = fsrs.schedule(currentCard, fsrsRating as 1 | 2 | 3 | 4, new Date());
+    const nextReview = fsrs.nextReviewDate(updatedCard);
+
+    await updateFSRSParameters(
+      target.objectId,
+      updatedCard.difficulty,
+      updatedCard.stability,
+      nextReview,
+      fsrsRating as 1 | 2 | 3 | 4
+    );
+
+    fsrsUpdates.push({
+      objectId: target.objectId,
+      nextReview: nextReview,
+      stability: updatedCard.stability,
+      difficulty: updatedCard.difficulty,
+    });
 
     // Update priority
     const languageObject = await db.languageObject.findUnique({
@@ -901,10 +919,20 @@ export async function processMultiObjectResponse(
 
     if (languageObject) {
       const previousPriority = languageObject.priority;
+
+      // Calculate priority components
+      const basePriority = languageObject.priority;
+      // calculateMasteryAdjustment needs (stage, cueFreeAccuracy, scaffoldingGap)
+      const scaffoldingGap = mastery.cueAssistedAccuracy - mastery.cueFreeAccuracy;
+      const masteryAdj = calculateMasteryAdjustment(newStage, newAccuracy, scaffoldingGap);
+      const urgency = calculateUrgencyScore(nextReview);
+      const isBottleneck = false; // Would need bottleneck detection here
+
       const newPriority = calculateEffectivePriority(
-        languageObject.fre as { F: number; R: number; E: number },
-        { stage: newStage, cueFreeAccuracy: newAccuracy, cueAssistedAccuracy: mastery.cueAssistedAccuracy },
-        languageObject.irtDifficulty
+        basePriority,
+        masteryAdj,
+        urgency,
+        isBottleneck
       );
 
       await updateObjectPriority(target.objectId, newPriority);
@@ -917,11 +945,20 @@ export async function processMultiObjectResponse(
     }
   }
 
-  // 7. Record response in database
-  const responseRecord = await recordResponse(sessionId, {
+  // 7. Record response in database for each target object
+  // Note: This records the first target; for multi-object, you might want individual records
+  const primaryTarget = taskSpec.targetObjects.find(t => t.isPrimaryTarget) || taskSpec.targetObjects[0];
+  const responseRecord = await recordResponse({
+    sessionId,
+    objectId: primaryTarget.objectId,
+    taskType: taskSpec.taskType,
+    taskFormat: taskSpec.taskFormat,
+    modality: taskSpec.modality,
     correct: evaluation.overallCorrect,
     responseTimeMs,
-    partialCredit: evaluation.compositeScore,
+    cueLevel,
+    responseContent: typeof response === 'string' ? response : JSON.stringify(response),
+    expectedContent: taskSpec.expectedAnswer,
   });
 
   // 8. Generate comprehensive feedback

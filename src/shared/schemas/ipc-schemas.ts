@@ -49,7 +49,7 @@ export const ObjectCreateSchema = z.object({
   relationalDensity: ratioSchema.optional(),
   contextualContribution: ratioSchema.optional(),
   irtDifficulty: z.number().min(-4).max(4).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 /** object:update request schema */
@@ -61,10 +61,10 @@ export const ObjectUpdateSchema = z.object({
   relationalDensity: ratioSchema.optional(),
   contextualContribution: ratioSchema.optional(),
   irtDifficulty: z.number().min(-4).max(4).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 }).refine(
   data => Object.keys(data).length > 1, // At least id + one field
-  { message: 'At least one field must be provided for update' }
+  'At least one field must be provided for update'
 );
 
 /** object:list request schema */

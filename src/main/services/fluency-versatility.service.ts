@@ -207,7 +207,18 @@ export async function analyzeTransition(
   // Assume 3000ms is 90th percentile speed
   const fluencySpeed = Math.min(1, 3000 / avgResponseTime);
 
-  // Calculate production improvement rate
+  // Calculate production improvement rate - get sessions with full response data
+  const recentSessionsWithAccuracy = await db.session.findMany({
+    where: { userId, goalId },
+    orderBy: { startedAt: 'desc' },
+    take: 5,
+    include: {
+      responses: {
+        select: { correct: true },
+      },
+    },
+  });
+
   const olderSessions = await db.session.findMany({
     where: { userId, goalId },
     orderBy: { startedAt: 'desc' },
@@ -220,11 +231,11 @@ export async function analyzeTransition(
     },
   });
 
-  const recentAccuracy = recentSessions.length > 0
-    ? recentSessions.reduce((sum, s) => {
+  const recentAccuracy = recentSessionsWithAccuracy.length > 0
+    ? recentSessionsWithAccuracy.reduce((sum, s) => {
         const correct = s.responses.filter((r) => r.correct).length;
         return sum + (s.responses.length > 0 ? correct / s.responses.length : 0);
-      }, 0) / recentSessions.length
+      }, 0) / recentSessionsWithAccuracy.length
     : 0;
 
   const olderAccuracy = olderSessions.length > 0

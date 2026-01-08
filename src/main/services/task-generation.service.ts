@@ -20,6 +20,11 @@ import {
   type WordProfile,
 } from '../../core/task-matching';
 import { analyzeResponseTime, getTargetResponseTime } from '../../core/response-timing';
+import {
+  selectContextWithGeneralization,
+  getObjectUsageSpace,
+} from './usage-space-tracking.service';
+import type { UsageContext, TaskType, MasteryStage, LanguageObjectType } from '../../core/types';
 
 // =============================================================================
 // Types
@@ -38,6 +43,8 @@ export interface TaskSpec {
   cueLevel: CueLevel;
   difficulty: number;
   isFluencyTask: boolean;
+  /** Usage context selected based on generalization estimation */
+  usageContext?: UsageContext;
 }
 
 export interface GeneratedTask {
@@ -317,6 +324,27 @@ export async function generateTaskSpec(
     cueLevel
   );
 
+  // Select usage context based on generalization estimation
+  // This integrates the Usage Space Expansion framework into task generation
+  let usageContext: UsageContext | undefined;
+  try {
+    const usageSpace = await getObjectUsageSpace(item.objectId);
+    // Map task format to TaskType enum
+    const taskType = mapFormatToTaskType(format);
+    // Select optimal context for generalization
+    usageContext = await selectContextWithGeneralization(
+      [usageSpace],
+      taskType,
+      {
+        strategy: isFluencyTask ? 'goal_alignment' : 'coverage_maximization',
+        preferExpansion: !isFluencyTask, // Versatility tasks expand coverage
+      }
+    );
+  } catch {
+    // Graceful degradation: if usage space fails, continue without context
+    usageContext = undefined;
+  }
+
   return {
     objectId: item.objectId,
     content: object.content,
@@ -326,7 +354,23 @@ export async function generateTaskSpec(
     cueLevel,
     difficulty,
     isFluencyTask,
+    usageContext,
   };
+}
+
+/**
+ * Map task format to TaskType enum.
+ * Maps internal format names to core/types.ts TaskType values.
+ */
+function mapFormatToTaskType(format: TaskFormat): TaskType {
+  const mapping: Record<TaskFormat, TaskType> = {
+    mcq: 'recognition',
+    fill_blank: 'fill_blank',
+    free_response: 'recall_free',
+    matching: 'recognition',
+    ordering: 'recognition',
+  };
+  return mapping[format];
 }
 
 /**
@@ -982,7 +1026,7 @@ export async function generateTaskWithMatching(
   // Build word profile for task matching
   const wordProfile: WordProfile = {
     content: object.content,
-    type: object.type,
+    type: object.type as LanguageObjectType,
     zVector,
     masteryStage: stage as 0 | 1 | 2 | 3 | 4,
     cueFreeAccuracy,
@@ -1093,7 +1137,7 @@ export async function generateTaskWithMatching(
   const targetResponseTime = config.targetResponseTimeMs ??
     getTargetResponseTime(
       recommendation.taskType === 'rapid_response' ? 'timed' : 'recall',
-      stage
+      stage as MasteryStage
     );
 
   // Estimate completion time
@@ -1709,7 +1753,6 @@ import {
 import type {
   MultiObjectTaskSpec,
   MultiObjectTarget,
-  LanguageObjectType,
 } from '../../core/types';
 
 /**
@@ -1876,7 +1919,7 @@ export async function generateMultiObjectTask(
   if (!primaryObject) return null;
 
   // Get mastery state
-  const mastery = await getMasteryState(primaryItem.objectId, sessionId);
+  const mastery = await getMasteryState(primaryItem.objectId);
   const stage = mastery?.stage ?? 0;
   const cueFreeAccuracy = mastery?.cueFreeAccuracy ?? 0;
 
@@ -1892,12 +1935,12 @@ export async function generateMultiObjectTask(
       : primaryObject.domainDistribution ?? {},
     morphologicalScore: primaryObject.morphologicalScore ?? 0.5,
     phonologicalDifficulty: primaryObject.phonologicalDifficulty ?? 0.5,
-  } as WordDifficultyResult);
+  });
 
   // Get task recommendation
   const wordProfile: WordProfile = {
     content: primaryObject.content,
-    type: primaryObject.type,
+    type: primaryObject.type as LanguageObjectType,
     zVector,
     masteryStage: stage as 0 | 1 | 2 | 3 | 4,
     cueFreeAccuracy,
@@ -1954,8 +1997,8 @@ export async function generateMultiObjectTask(
   }
 
   // Get goal domain
-  const goal = await db.goal.findUnique({ where: { id: goalId } });
-  const domain = goal?.domain ?? 'general';
+  const goalSpec = await db.goalSpec.findUnique({ where: { id: goalId } });
+  const domain = goalSpec?.domain ?? 'general';
 
   // Create multi-object task spec
   const multiObjectSpec = createMultiObjectTaskSpec(
@@ -2118,7 +2161,7 @@ export async function generateTaskWithAutoMultiObject(
     throw new Error(`Language object not found: ${item.objectId}`);
   }
 
-  const mastery = await getMasteryState(item.objectId, sessionId);
+  const mastery = await getMasteryState(item.objectId);
   const stage = mastery?.stage ?? 0;
 
   // Find related objects to check availability
@@ -2133,11 +2176,11 @@ export async function generateTaskWithAutoMultiObject(
       : object.domainDistribution ?? {},
     morphologicalScore: object.morphologicalScore ?? 0.5,
     phonologicalDifficulty: object.phonologicalDifficulty ?? 0.5,
-  } as WordDifficultyResult);
+  });
 
   const wordProfile: WordProfile = {
     content: object.content,
-    type: object.type,
+    type: object.type as LanguageObjectType,
     zVector,
     masteryStage: stage as 0 | 1 | 2 | 3 | 4,
     cueFreeAccuracy: mastery?.cueFreeAccuracy ?? 0,
