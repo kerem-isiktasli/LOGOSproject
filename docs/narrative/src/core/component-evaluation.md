@@ -110,7 +110,7 @@ This module is grounded in three foundational theories from applied linguistics 
 | Intonation | 20% | No | 2 (Recall) |
 | Connected Speech | 15% | No | 3 (Controlled) |
 
-**Why This Weighting**: Individual phoneme accuracy is critical because many phoneme contrasts distinguish meaning (ship/sheep, bit/beat). Stress and intonation are important but errors rarely cause complete misunderstanding. Connected speech features (linking, reduction) are advanced fluency markers.
+**Why This Weighting**: Individual phoneme accuracy is critical because many phoneme contrasts distinguish meaning (ship/ sheep, bit/beat). Stress and intonation are important but errors rarely cause complete misunderstanding. Connected speech features (linking, reduction) are advanced fluency markers.
 
 **Error Types**:
 - **Phoneme Substitution** (severity: 0.7): Pronouncing /th/ as /s/ in "think" - can cause confusion between words, causes cascade effects
