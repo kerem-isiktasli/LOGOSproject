@@ -57,9 +57,13 @@ async function createWindow(): Promise<void> {
 
   // Load the app
   if (isDev) {
+  // Give Vite server extra time to boot
+  setTimeout(() => {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
-  } else {
+  }, 3000);  // 3 seconds delay - increase to 5000 if needed
+  }
+  else {
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
 
